@@ -164,25 +164,54 @@ export const FileUploader = forwardRef<
         formData.append("metadata", JSON.stringify({}));
 
         try {
-          // Direct upload to FastAPI backend to bypass browser CORS / PNA restrictions
-          const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
-          const uploadResponse = await fetch(`${backendUrl}/upload`, {
-            method: "POST",
-            body: formData,
+          // Add timestamp to filename to prevent duplicates
+          const timestamp = new Date().getTime();
+          const fileExt = file.name.split(".").pop() || "";
+          const fileNameWithoutExt = file.name.slice(0, -(fileExt.length + 1));
+          const uniqueFileName = `${fileNameWithoutExt}_${timestamp}.${fileExt}`;
+
+          // Get presigned URL using SDK
+          const response = await getPresignedUrl({
+            query: {
+              filename: uniqueFileName,
+            },
             headers: {
               Authorization: `Bearer ${session?.user?.apiToken}`,
+              "Content-Type": "application/json",
             },
           });
+          const presignedUrlResponse = response.data as PresignedUrlResponse;
+          console.log("Presigned URL response:", presignedUrlResponse);
+          const upload_url = presignedUrlResponse?.upload_url;
+          const object_name = presignedUrlResponse?.object_name;
+          if (!upload_url) {
+            throw new Error("Failed to get presigned URL");
+          }
+
+          // Route presigned URL through Next.js /s3local proxy to avoid browser CORS/PNA issues
+          let targetUrl = upload_url;
+          if (typeof window !== "undefined") {
+            targetUrl = targetUrl.replace(
+              /^http:\/\/(localhost|127\.0\.0\.1):9000/,
+              `${window.location.origin}/s3local`
+            );
+          }
+
+          const uploadHeaders: Record<string, string> = {};
+          if (file.type) {
+            uploadHeaders["Content-Type"] = file.type;
+          }
+
+          // Now upload the file using the presigned URL
+          const uploadResponse = await fetch(targetUrl, {
+            method: "PUT",
+            body: file,
+            headers: uploadHeaders,
+          });
           if (!uploadResponse.ok) {
-            const errorText = await uploadResponse.text();
-            throw new Error(`Upload failed: ${errorText || uploadResponse.statusText}`);
+            throw new Error(`Upload failed with status ${uploadResponse.status}`);
           }
-          const uploadResponseData = await uploadResponse.json() as PresignedUrlResponse;
-          console.log("Direct upload response:", uploadResponseData);
-          const object_name = uploadResponseData?.object_name;
-          if (!object_name) {
-            throw new Error("Failed to get object name from upload response");
-          }
+          console.log("Upload response:", uploadResponse);
 
           // Extract dataset after successful upload
           const extractCsvDataRequest: ExtractCsvDataRequest = {

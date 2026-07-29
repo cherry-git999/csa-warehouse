@@ -3,6 +3,7 @@ import { Button, ButtonProps } from "../ui/button";
 import { Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "../hooks/use-toast";
+import { getPresignedUrl } from "@/lib/hey-api/client/sdk.gen";
 
 export interface FileDownloadButtonProps extends Omit<ButtonProps, "onClick"> {
   fileID: string | null;
@@ -55,28 +56,30 @@ const FileDownloadButton = React.forwardRef<
           return;
         }
 
-        // Direct download from FastAPI backend to bypass browser CORS / PNA / SSL restrictions
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
-        const downloadResponse = await fetch(`${backendUrl}/files/${fileID}/view`, {
+        const response = await getPresignedUrl({
+          query: {
+            filename: fileID,
+          },
           headers: {
             Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
           },
         });
 
-        if (!downloadResponse.ok) {
-          const errorText = await downloadResponse.text();
-          throw new Error(errorText || `Download request failed: ${downloadResponse.statusText}`);
-        }
+        const presignedUrlData = response.data as { upload_url?: string };
+        let downloadUrl = presignedUrlData?.upload_url;
 
-        const blob = await downloadResponse.blob();
-        const blobUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = downloadName.endsWith(".csv") ? downloadName : `${downloadName}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(blobUrl);
+        if (downloadUrl) {
+          if (typeof window !== "undefined") {
+            downloadUrl = downloadUrl.replace(
+              /^http:\/\/(localhost|127\.0\.0\.1):9000/,
+              `${window.location.origin}/s3local`
+            );
+          }
+          window.open(downloadUrl, "_blank");
+        } else {
+          throw new Error("Failed to get file URL");
+        }
       } catch (error) {
         console.error("Error downloading file:", error);
         theToast.toast({
