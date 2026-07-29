@@ -28,6 +28,15 @@ datasets_router = APIRouter()
 def get_presigned_url(filename: str, current_user: dict = Depends(get_current_user)) -> PresignedURLResponse:
     storage_service = get_storage_service()
     user_id = str(current_user.get("_id"))
+    
+    # Check if filename is an existing file_id ObjectId in files_collection
+    if ObjectId.is_valid(filename):
+        file_doc = files_collection.find_one({"_id": ObjectId(filename)})
+        if file_doc and file_doc.get("file_location"):
+            file_location = file_doc["file_location"]
+            download_url = storage_service.generate_download_url(file_location)
+            return PresignedURLResponse(upload_url=download_url, object_name=file_location)
+
     url, object_name = storage_service.generate_presigned_url(
         filename=filename, user_id=user_id)
     return PresignedURLResponse(upload_url=url, object_name=object_name)
