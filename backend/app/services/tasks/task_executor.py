@@ -2,6 +2,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
+import pandas as pd
 
 from app.utils.erp import pull_dataset
 from app.services.storage.mongodb_service import (
@@ -10,6 +11,7 @@ from app.services.storage.mongodb_service import (
     update_sync_checkpoint,
 )
 from app.config.pipeline_mapping import get_pipeline_config
+from app.mappings import map_erp_data
 from app.config.logging import LoggerMixin
 from app.db.database import datasets_collection, pipelines_collection, pipelines_history_collection
 
@@ -31,11 +33,12 @@ class TaskRunner(LoggerMixin):
         target_pipeline_id = pipeline_id or dataset_name
 
         try:
-            # Determine pipeline config (source_type, sync_strategy, identity_key)
+            # Determine pipeline config (source_type, sync_strategy, identity_key, mapper)
             config = get_pipeline_config(target_pipeline_id)
             source_type = config.get("source_type", "doctype")
             sync_strategy = config.get("sync_strategy", "timestamp" if source_type == "doctype" else "snapshot")
             identity_key = config.get("identity_key", "name" if source_type == "doctype" else None)
+            mapper_name = config.get("mapper")
 
             # Retrieve checkpoint for incremental sync
             since_timestamp = None
@@ -48,11 +51,22 @@ class TaskRunner(LoggerMixin):
                     self.logger.info(f"[{exec_id}] No previous successful checkpoint found for '{target_pipeline_id}'. Running initial full sync.")
 
             # Pull fresh dataset from ERP (incremental if since_timestamp provided)
-            dataset = pull_dataset(target_pipeline_id, since_timestamp=since_timestamp)
-            self.logger.info(
-                f"[{exec_id}] Pulled dataset with {len(dataset)} records.")
+            raw_dataset = pull_dataset(target_pipeline_id, since_timestamp=since_timestamp)
+            raw_count = len(raw_dataset) if hasattr(raw_dataset, "__len__") else 0
+            self.logger.info(f"[{exec_id}] Pulled raw dataset with {raw_count} records.")
 
-            dataset_json = dataset.to_dict(orient="records")
+            # Apply Phase 3 Dashboard Data Mapping if configured
+            mapped_data = map_erp_data(raw_dataset, target_pipeline_id, mapper_name=mapper_name)
+
+            if isinstance(mapped_data, pd.DataFrame):
+                dataset_json = mapped_data.to_dict(orient="records")
+            elif isinstance(mapped_data, list):
+                dataset_json = mapped_data
+            else:
+                dataset_json = [mapped_data]
+
+            self.logger.info(
+                f"[{exec_id}] Prepared {len(dataset_json)} mapped records for storage.")
 
             # Store/update dataset in MongoDB using upsert/merge or snapshot replacement
             storage_mode = "upsert" if sync_strategy == "timestamp" else "replace"

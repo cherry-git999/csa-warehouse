@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union, List
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -16,10 +16,11 @@ def pull_dataset(
     pipeline_id: str,
     filters: Optional[Dict[str, Any]] = None,
     since_timestamp: Optional[str] = None,
-) -> pd.DataFrame:
+) -> Union[pd.DataFrame, List[Dict[str, Any]]]:
     """
     Generic ERP extraction bridge for CSA Warehouse.
     Uses ERPNextClient to pull standard DocTypes or Query Reports.
+    Supports multi-ERP instance routing based on pipeline configuration.
 
     Args:
         pipeline_id (str): Internal pipeline ID or ERP dataset/report name.
@@ -27,21 +28,22 @@ def pull_dataset(
         since_timestamp (Optional[str]): If provided, only fetch records modified on or after this timestamp.
 
     Returns:
-        pd.DataFrame: Retrieved raw ERP dataset.
+        pd.DataFrame or List[Dict[str, Any]]: Retrieved raw ERP dataset or document list.
     """
-    erp_uri = os.getenv("ERP_URI") or os.getenv("ERPNEXT_URI")
-    erp_username = os.getenv("ERP_USERNAME") or os.getenv("ERPNEXT_USERNAME")
-    erp_password = os.getenv("ERP_PASSWORD") or os.getenv("ERPNEXT_PASSWORD")
-
-    if not all([erp_uri, erp_username, erp_password]):
-        raise ValueError("Missing required environment variables: ERP_URI, ERP_USERNAME, ERP_PASSWORD")
-
-    # Map pipeline_id to source configuration (source_name, source_type)
     config = get_pipeline_config(pipeline_id)
     source_name = config.get("source_name", pipeline_id)
     source_type = config.get("source_type", "doctype")
     sync_strategy = config.get("sync_strategy", "timestamp" if source_type == "doctype" else "snapshot")
     applied_filters = dict(filters or config.get("default_filters") or {})
+    fetch_full_docs = config.get("fetch_full_docs", False)
+
+    # Determine ERP instance URL (from pipeline config or environment fallback)
+    erp_uri = config.get("erp_base_url") or os.getenv("ERP_URI") or os.getenv("ERPNEXT_URI")
+    erp_username = os.getenv("ERP_USERNAME") or os.getenv("ERPNEXT_USERNAME")
+    erp_password = os.getenv("ERP_PASSWORD") or os.getenv("ERPNEXT_PASSWORD")
+
+    if not all([erp_uri, erp_username, erp_password]):
+        raise ValueError("Missing required environment variables: ERP_URI, ERP_USERNAME, ERP_PASSWORD")
 
     # For timestamp-based DocType sync, apply watermark filter if since_timestamp provided
     if source_type == "doctype" and sync_strategy == "timestamp" and since_timestamp:
@@ -49,7 +51,7 @@ def pull_dataset(
         logger.info(f"Applying incremental sync watermark filter: modified >= {since_timestamp}")
 
     logger.info(
-        f"Pulling pipeline '{pipeline_id}': source_name='{source_name}', source_type='{source_type}', sync_strategy='{sync_strategy}'"
+        f"Pulling pipeline '{pipeline_id}': erp_uri='{erp_uri}', source_name='{source_name}', source_type='{source_type}', sync_strategy='{sync_strategy}'"
     )
 
     try:
@@ -57,7 +59,7 @@ def pull_dataset(
         client = ERPNextClient(base_url=erp_uri)
 
         client.login(username=erp_username, password=erp_password)
-        logger.info("Successfully logged in to ERP")
+        logger.info(f"Successfully logged in to ERP: {erp_uri}")
 
         logger.info(f"Fetching dataset via ERPNextClient: {source_name} ({source_type})")
         try:
@@ -66,6 +68,13 @@ def pull_dataset(
                     report_name=source_name,
                     filters=applied_filters or None,
                 )
+            elif fetch_full_docs:
+                # Fetch full documents including embedded child tables (e.g. for CC Daily Reports)
+                doc_obj = client.get_dataset_object(
+                    dataset_id=source_name,
+                    filters=applied_filters or None,
+                )
+                return doc_obj.get("records", [])
             else:
                 # Standard DocType: fetch with fields=["*"] to get audit attributes (name, modified, creation)
                 dataset = client.get_dataset(
@@ -76,6 +85,8 @@ def pull_dataset(
 
             if isinstance(dataset, pd.DataFrame):
                 logger.info(f"Successfully retrieved {len(dataset)} records. Columns: {list(dataset.columns)}")
+                return dataset
+            elif isinstance(dataset, list):
                 return dataset
             else:
                 return pd.DataFrame(dataset)
