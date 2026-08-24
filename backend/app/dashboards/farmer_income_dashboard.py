@@ -17,7 +17,7 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page
+from utilities import initialize_page, load_dashboard_data_from_mongodb
 
 import pandas as pd
 import plotly.express as px
@@ -36,16 +36,24 @@ LOGO_PATH = Path(__file__).parent / "assets" / "images" / "csalogo.png"
 initialize_page()
 
 
-# ── Data loading — swap this function for MongoDB when ready ───────────────────
+# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
     """
-    Load farmer income & visits data.
-
-    Current source : CSV  (data/farmer_income_data.csv)
-    Future source  : MongoDB collection  "farmer_income_visits"
+    Load farmer income & visits data from MongoDB collection 'farmer_income_visits'.
+    Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+    df = load_dashboard_data_from_mongodb("farmer_income_visits")
+
+    if df is None or df.empty:
+        if DATA_CSV.exists():
+            df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+        else:
+            return pd.DataFrame(columns=[
+                "coordinator_name", "month", "village", "farmers_met",
+                "visits", "score", "income", "net_income", "yield"
+            ])
+
     return df
 
 

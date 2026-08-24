@@ -17,7 +17,7 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page
+from utilities import initialize_page, load_dashboard_data_from_mongodb
 
 import pandas as pd
 import numpy as np
@@ -49,17 +49,24 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — swap this function for MongoDB when ready ───────────────────
+# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
     """
-    Load revenue analysis data.
-
-    Current source : CSV  (data/revenue_analysis_data.csv)
-    Future source  : MongoDB collection  "revenue_analysis"
+    Load revenue analysis data from MongoDB collection 'revenue_analysis'.
+    Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
-    df["net_revenue"] = df["sales_amount"] - df["purchase_amount"]
+    df = load_dashboard_data_from_mongodb("revenue_analysis")
+
+    if df is None or df.empty:
+        if DATA_CSV.exists():
+            df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+        else:
+            return pd.DataFrame(columns=["territory", "month", "purchase_amount", "sales_amount", "net_revenue"])
+
+    sales = df["sales_amount"].fillna(0) if "sales_amount" in df.columns else 0
+    purchases = df["purchase_amount"].fillna(0) if "purchase_amount" in df.columns else 0
+    df["net_revenue"] = sales - purchases
     return df
 
 
@@ -122,48 +129,53 @@ if sel_territories:
     df_f = df_f[df_f["territory"].isin(sel_territories)]
 
 
-# ── Metrics ────────────────────────────────────────────────────────────────────
-# Exact matches to the screenshot KPI display:
-# Avg Monthly Purchase: 226.31K
-# Avg Monthly Sales: 11.31K
-# Profit Margin %: -99.09
-# Net Revenue Std Dev: 410.93K
-avg_monthly_purchase = 226310.0
-avg_monthly_sales = 11310.0
-profit_margin = -99.09
-net_rev_std_dev = 410930.0
+# ── Dynamic Metrics (calculated from MongoDB data) ─────────────────────────────
+has_sales_data = df_f["sales_amount"].notna().any() if "sales_amount" in df_f.columns else False
+
+avg_monthly_purchase = float(df_f["purchase_amount"].mean()) if not df_f.empty and "purchase_amount" in df_f.columns and df_f["purchase_amount"].notna().any() else 0.0
+avg_monthly_sales = float(df_f["sales_amount"].dropna().mean()) if has_sales_data else 0.0
+
+total_purchases_all = float(df_f["purchase_amount"].sum()) if "purchase_amount" in df_f.columns else 0.0
+total_sales_all = float(df_f["sales_amount"].sum()) if has_sales_data else 0.0
+
+if has_sales_data and total_purchases_all > 0:
+    profit_margin = ((total_sales_all - total_purchases_all) / total_purchases_all) * 100.0
+elif total_purchases_all > 0:
+    profit_margin = -100.0
+else:
+    profit_margin = 0.0
+
+net_rev_std_dev = float(df_f["net_revenue"].std()) if len(df_f) > 1 and df_f["net_revenue"].notna().any() else 0.0
 
 
-# ── Aggregations ───────────────────────────────────────────────────────────────
-# Calculate aggregated values for charts
+# ── Dynamic Aggregations ───────────────────────────────────────────────────────
 territory_summary = (
     df_f.groupby("territory", as_index=False)
     .agg(
         net_revenue=("net_revenue", "sum"),
         purchase_amount=("purchase_amount", "sum"),
-        sales_amount=("sales_amount", "sum"),
+        sales_amount=("sales_amount", lambda s: s.sum() if s.notna().any() else 0.0),
     )
 )
-# For the screenshot representation, let's set Net Revenue to -3.38M / -3.39M
-territory_summary.loc[territory_summary["territory"] == "Ananthapur", "net_revenue"] = -3380000
-territory_summary.loc[territory_summary["territory"] == "Nuzendia(MDL)", "net_revenue"] = -3390000
-territory_summary.loc[territory_summary["territory"] == "(Blank)", "net_revenue"] = -3380000
 
-territory_summary["profit_margin"] = (
-    (territory_summary["sales_amount"] - territory_summary["purchase_amount"]) / territory_summary["purchase_amount"] * 100
+if not territory_summary.empty:
+    territory_summary["profit_margin"] = territory_summary.apply(
+        lambda r: ((r["sales_amount"] - r["purchase_amount"]) / r["purchase_amount"] * 100.0)
+        if r["purchase_amount"] > 0 else 0.0,
+        axis=1
+    )
+
+# Dynamic month aggregation
+month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+month_summary = (
+    df_f.groupby("month", as_index=False)
+    .agg(net_revenue=("net_revenue", "sum"))
 )
-# Make Profit Margin % negative to match the screenshot chart (-100%, -1700%)
-territory_summary.loc[territory_summary["territory"] == "Ananthapur", "profit_margin"] = -100.0
-territory_summary.loc[territory_summary["territory"] == "Nuzendia(MDL)", "profit_margin"] = -1700.0
-territory_summary.loc[territory_summary["territory"] == "(Blank)", "profit_margin"] = -100.0
-
-# Month aggregation
-months = ["Jun", "Nov", "Oct", "Mar", "Jul", "Aug", "Sep", "Feb", "(Blank)"]
-month_net_rev = [0.0, -50000.0, -100000.0, -150000.0, -150000.0, -150000.0, -500000.0, -510000.0, -1700000.0]
-month_summary = pd.DataFrame({
-    "month": months,
-    "net_revenue": month_net_rev
-})
+if not month_summary.empty:
+    month_summary["month_idx"] = month_summary["month"].apply(
+        lambda m: month_order.index(m) if m in month_order else 99
+    )
+    month_summary = month_summary.sort_values("month_idx").drop(columns=["month_idx"])
 
 
 ############################################
@@ -178,9 +190,9 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
     ui.metric_card("Avg Monthly Purchase", fmt_amount(avg_monthly_purchase))
 with c2:
-    ui.metric_card("Avg Monthly Sales", fmt_amount(avg_monthly_sales))
+    ui.metric_card("Avg Monthly Sales", fmt_amount(avg_monthly_sales) if has_sales_data else "Awaiting data")
 with c3:
-    ui.metric_card("Profit Margin %", f"{profit_margin}%")
+    ui.metric_card("Profit Margin %", f"{profit_margin:.2f}%" if has_sales_data else "Awaiting sales")
 with c4:
     ui.metric_card("Net Revenue Std Dev", fmt_amount(net_rev_std_dev))
 

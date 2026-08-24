@@ -387,3 +387,80 @@ def create_sidebar(df_issues, df_date, min_date_raw, max_date_raw):
         comparison_label,
         prev_custom_start,
     )
+
+
+# ------------------ MongoDB Dashboard Data Loader ------------------
+def _get_mongodb_db():
+    """
+    Get the existing MongoDB database instance.
+    """
+    import sys
+    backend_dir = str(Path(__file__).resolve().parent.parent.parent)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    try:
+        from app.db.database import db
+        return db
+    except Exception as e:
+        import os
+        from dotenv import load_dotenv
+        from pymongo import MongoClient
+        load_dotenv()
+        mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+        client = MongoClient(mongo_uri)
+        return client["fastapi_db"]
+
+
+def load_dashboard_data_from_mongodb(collection_or_dataset_name: str) -> pd.DataFrame:
+    """
+    Generic utility to load dashboard data from MongoDB.
+    Queries:
+    1. Direct collection in database: db[collection_or_dataset_name]
+    2. Datasets collection via dataset_information (where dataset_name or pipeline_id matches)
+    3. Datasets collection directly by _id
+
+    Args:
+        collection_or_dataset_name (str): The target collection or dataset name.
+
+    Returns:
+        pd.DataFrame: Retrieved data with _id excluded, or empty DataFrame if not found.
+    """
+    if not collection_or_dataset_name:
+        return pd.DataFrame()
+
+    try:
+        db = _get_mongodb_db()
+
+        # 1. Check direct collection
+        if collection_or_dataset_name in db.list_collection_names():
+            coll = db[collection_or_dataset_name]
+            docs = list(coll.find({}, {"_id": 0}))
+            if docs:
+                return pd.DataFrame(docs)
+
+        # 2. Check datasets_information / datasets collection
+        datasets_info_coll = db["datasets_information"]
+        datasets_coll = db["datasets"]
+
+        info = datasets_info_coll.find_one({
+            "$or": [
+                {"dataset_name": collection_or_dataset_name},
+                {"pipeline_id": collection_or_dataset_name},
+            ]
+        })
+        if info and "dataset_id" in info:
+            dataset_doc = datasets_coll.find_one({"_id": info["dataset_id"]})
+            if dataset_doc and "data" in dataset_doc:
+                return pd.DataFrame(dataset_doc["data"])
+
+        # 3. Check datasets collection directly by _id (string or ObjectId)
+        dataset_doc = datasets_coll.find_one({"_id": collection_or_dataset_name})
+        if dataset_doc and "data" in dataset_doc:
+            return pd.DataFrame(dataset_doc["data"])
+
+        return pd.DataFrame()
+
+    except Exception as e:
+        print(f"Error loading dashboard data from MongoDB for '{collection_or_dataset_name}': {e}")
+        return pd.DataFrame()
+

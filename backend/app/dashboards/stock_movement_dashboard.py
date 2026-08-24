@@ -17,7 +17,7 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page
+from utilities import initialize_page, load_dashboard_data_from_mongodb
 
 import pandas as pd
 import plotly.express as px
@@ -48,16 +48,21 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — swap this function for MongoDB when ready ───────────────────
+# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
     """
-    Load stock movement data.
-
-    Current source : CSV  (data/stock_movement_data.csv)
-    Future source  : MongoDB collection  "stock_movement"
+    Load stock movement data from MongoDB collection 'stock_movement'.
+    Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+    df = load_dashboard_data_from_mongodb("stock_movement")
+
+    if df is None or df.empty:
+        if DATA_CSV.exists():
+            df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+        else:
+            return pd.DataFrame(columns=["date", "in_qty", "out_qty", "balance_value", "year"])
+
     df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
     df["year"] = df["date"].dt.year.astype(str)
     return df

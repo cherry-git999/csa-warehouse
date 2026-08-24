@@ -18,7 +18,7 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page
+from utilities import initialize_page, load_dashboard_data_from_mongodb
 
 import pandas as pd
 import plotly.express as px
@@ -41,16 +41,24 @@ LOGO_PATH = Path(__file__).parent / "assets" / "images" / "csalogo.png"
 initialize_page()
 
 
-# ── Data loading — swap this function for MongoDB when ready ───────────────────
+# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
 @st.cache_data
 def load_nf_data() -> pd.DataFrame:
     """
-    Load NF Coordinator activity data.
-
-    Current source : CSV  (data/nf_coordinator_data.csv)
-    Future source  : MongoDB collection  "nf_coordinator_activities"
+    Load NF Coordinator activity data from MongoDB collection 'nf_coordinator_activities'.
+    Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = pd.read_csv(NF_CSV, encoding="ISO-8859-1")
+    df = load_dashboard_data_from_mongodb("nf_coordinator_activities")
+
+    if df is None or df.empty:
+        if NF_CSV.exists():
+            df = pd.read_csv(NF_CSV, encoding="ISO-8859-1")
+        else:
+            return pd.DataFrame(columns=[
+                "coordinator_name", "district", "date", "type_of_activity",
+                "planned_activities", "actual_activities", "total_score"
+            ])
+
     df["date"]        = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
     df["month_label"] = df["date"].dt.strftime("%b %Y")
     df["month_short"] = df["date"].dt.strftime("%B")

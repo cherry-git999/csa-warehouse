@@ -18,7 +18,7 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page
+from utilities import initialize_page, load_dashboard_data_from_mongodb
 
 import pandas as pd
 import plotly.express as px
@@ -50,16 +50,21 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — swap this function for MongoDB when ready ───────────────────
+# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
     """
-    Load territory purchase & sales data.
-
-    Current source : CSV  (data/purchase_sales_data.csv)
-    Future source  : MongoDB collection  "territory_transactions"
+    Load territory purchase & sales data from MongoDB collection 'territory_transactions'.
+    Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+    df = load_dashboard_data_from_mongodb("territory_transactions")
+
+    if df is None or df.empty:
+        if DATA_CSV.exists():
+            df = pd.read_csv(DATA_CSV, encoding="ISO-8859-1")
+        else:
+            return pd.DataFrame(columns=["territory", "date", "purchase_amount", "sales_amount"])
+
     df["date"]         = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
     df["month_year"]   = df["date"].dt.strftime("%b %Y")      # "Sep 2024"
     df["month_period"] = df["date"].dt.to_period("M")         # for sorting
