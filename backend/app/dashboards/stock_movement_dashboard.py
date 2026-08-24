@@ -49,13 +49,14 @@ def fmt_amount(val: float) -> str:
 
 
 # ── Data loading — MongoDB primary with reference CSV fallback ────────────────
-@st.cache_data
-def load_data() -> pd.DataFrame:
+@st.cache_data(ttl=10)
+def load_data(force_sync: bool = True) -> pd.DataFrame:
     """
     Load stock movement data from MongoDB collection 'stock_movement'.
+    Triggers automatic synchronization with ERPNext to ensure latest data.
     Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = load_dashboard_data_from_mongodb("stock_movement")
+    df = load_dashboard_data_from_mongodb("stock_movement", auto_sync=force_sync)
 
     if df is None or df.empty:
         if DATA_CSV.exists():
@@ -89,6 +90,11 @@ st.sidebar.markdown(
     """<div class="sidebar-header">Stock Movement Dashboard</div>""",
     unsafe_allow_html=True,
 )
+
+if st.sidebar.button("🔄 Sync with ERP", key="sync_movement_btn"):
+    st.cache_data.clear()
+    st.rerun()
+
 st.markdown(
     """
     <style>

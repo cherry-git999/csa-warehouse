@@ -411,9 +411,51 @@ def _get_mongodb_db():
         return client["fastapi_db"]
 
 
-def load_dashboard_data_from_mongodb(collection_or_dataset_name: str) -> pd.DataFrame:
+def trigger_warehouse_auto_sync(pipeline_id: str) -> bool:
+    """
+    Triggers synchronization for a warehouse pipeline using the existing TaskRunner.
+    Reuses Phase 1 extraction, Phase 2 checkpoint sync, Phase 3 mapping, and MongoDB storage.
+    Catches any ERP/network exceptions gracefully so existing MongoDB data is preserved.
+
+    Args:
+        pipeline_id (str): The pipeline identifier (e.g. 'stock_inventory' or 'stock_movement')
+
+    Returns:
+        bool: True if sync succeeded, False otherwise
+    """
+    if not pipeline_id:
+        return False
+
+    try:
+        import uuid
+        from bson import ObjectId
+        from app.services.tasks.task_executor import task_runner, tasks
+
+        exec_id = str(uuid.uuid4())
+        dataset_id = str(ObjectId())
+        user_id = str(ObjectId())
+        tasks[exec_id] = {"status": "running"}
+
+        task_runner.run_pipeline_task(
+            dataset_id=dataset_id,
+            dataset_name=pipeline_id,
+            user_id=user_id,
+            exec_id=exec_id,
+            pipeline_id=pipeline_id,
+        )
+
+        status = tasks.get(exec_id, {}).get("status")
+        return status == "completed"
+    except Exception as e:
+        print(f"Warehouse auto-sync execution error for pipeline '{pipeline_id}': {e}")
+        return False
+
+
+def load_dashboard_data_from_mongodb(collection_or_dataset_name: str, auto_sync: bool = False) -> pd.DataFrame:
     """
     Generic utility to load dashboard data from MongoDB.
+    Optionally triggers an automatic background/synchronous pipeline synchronization before query.
+
     Queries:
     1. Direct collection in database: db[collection_or_dataset_name]
     2. Datasets collection via dataset_information (where dataset_name or pipeline_id matches)
@@ -421,12 +463,19 @@ def load_dashboard_data_from_mongodb(collection_or_dataset_name: str) -> pd.Data
 
     Args:
         collection_or_dataset_name (str): The target collection or dataset name.
+        auto_sync (bool): If True, triggers auto-sync via existing TaskRunner before reading.
 
     Returns:
         pd.DataFrame: Retrieved data with _id excluded, or empty DataFrame if not found.
     """
     if not collection_or_dataset_name:
         return pd.DataFrame()
+
+    if auto_sync:
+        try:
+            trigger_warehouse_auto_sync(collection_or_dataset_name)
+        except Exception as sync_err:
+            print(f"Auto-sync failed gracefully for '{collection_or_dataset_name}': {sync_err}")
 
     try:
         db = _get_mongodb_db()
@@ -463,4 +512,5 @@ def load_dashboard_data_from_mongodb(collection_or_dataset_name: str) -> pd.Data
     except Exception as e:
         print(f"Error loading dashboard data from MongoDB for '{collection_or_dataset_name}': {e}")
         return pd.DataFrame()
+
 
