@@ -29,6 +29,9 @@ pipelines_collection = db["pipelines"]
 # Collection for pipeline execution history
 pipelines_history_collection = db["pipelines_history"]
 
+# Collection for synchronization checkpoints / watermarks
+sync_checkpoints_collection = db["sync_checkpoints"]
 
 # Collection for endpoint access control
 endpoint_access_collection = db["endpoint_access"]
+

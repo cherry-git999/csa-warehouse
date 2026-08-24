@@ -1,10 +1,10 @@
 import os
-import json
+from typing import Optional, Dict, Any
 import pandas as pd
 from dotenv import load_dotenv
 
 from app.config.logging import get_logger, setup_logging
-from app.config.pipeline_mapping import get_dataset_name_for_pipeline
+from app.config.pipeline_mapping import get_pipeline_config
 from erp_client.erp_next_client import ERPNextClient
 
 setup_logging()
@@ -12,38 +12,45 @@ logger = get_logger("services.erp")
 load_dotenv()
 
 
-def get_dataset_with_fields(
-    client: ERPNextClient, dataset_id: str, fields: list = None, limit_page_length: int = 10
+def pull_dataset(
+    pipeline_id: str,
+    filters: Optional[Dict[str, Any]] = None,
+    since_timestamp: Optional[str] = None,
 ) -> pd.DataFrame:
-    if fields is None:
-        fields = ["*"]
+    """
+    Generic ERP extraction bridge for CSA Warehouse.
+    Uses ERPNextClient to pull standard DocTypes or Query Reports.
 
-    endpoint = f"{client.base_url}/api/resource/{dataset_id}"
-    fields_json = str(fields).replace("'", '"')
+    Args:
+        pipeline_id (str): Internal pipeline ID or ERP dataset/report name.
+        filters (Optional[Dict[str, Any]]): Optional query filters.
+        since_timestamp (Optional[str]): If provided, only fetch records modified on or after this timestamp.
 
-    params = {
-        "limit_page_length": limit_page_length,
-        "fields": json.dumps(fields),
-    }
-
-    response = client.session.get(endpoint, params=params)
-    response.raise_for_status()
-
-    records = response.json().get("data", [])
-    return pd.DataFrame(records)
-
-
-def pull_dataset(pipeline_id: str) -> pd.DataFrame:
-    erp_uri = os.getenv("ERP_URI")
-    erp_username = os.getenv("ERP_USERNAME")
-    erp_password = os.getenv("ERP_PASSWORD")
+    Returns:
+        pd.DataFrame: Retrieved raw ERP dataset.
+    """
+    erp_uri = os.getenv("ERP_URI") or os.getenv("ERPNEXT_URI")
+    erp_username = os.getenv("ERP_USERNAME") or os.getenv("ERPNEXT_USERNAME")
+    erp_password = os.getenv("ERP_PASSWORD") or os.getenv("ERPNEXT_PASSWORD")
 
     if not all([erp_uri, erp_username, erp_password]):
         raise ValueError("Missing required environment variables: ERP_URI, ERP_USERNAME, ERP_PASSWORD")
 
-    # Map pipeline_id to actual dataset name
-    dataset_name = get_dataset_name_for_pipeline(pipeline_id)
-    logger.info(f"Mapped pipeline_id '{pipeline_id}' to dataset name '{dataset_name}'")
+    # Map pipeline_id to source configuration (source_name, source_type)
+    config = get_pipeline_config(pipeline_id)
+    source_name = config.get("source_name", pipeline_id)
+    source_type = config.get("source_type", "doctype")
+    sync_strategy = config.get("sync_strategy", "timestamp" if source_type == "doctype" else "snapshot")
+    applied_filters = dict(filters or config.get("default_filters") or {})
+
+    # For timestamp-based DocType sync, apply watermark filter if since_timestamp provided
+    if source_type == "doctype" and sync_strategy == "timestamp" and since_timestamp:
+        applied_filters["modified"] = [">=", str(since_timestamp)]
+        logger.info(f"Applying incremental sync watermark filter: modified >= {since_timestamp}")
+
+    logger.info(
+        f"Pulling pipeline '{pipeline_id}': source_name='{source_name}', source_type='{source_type}', sync_strategy='{sync_strategy}'"
+    )
 
     try:
         logger.info(f"Connecting to ERP instance: {erp_uri}")
@@ -52,30 +59,42 @@ def pull_dataset(pipeline_id: str) -> pd.DataFrame:
         client.login(username=erp_username, password=erp_password)
         logger.info("Successfully logged in to ERP")
 
-        logger.info(f"Fetching dataset: {dataset_name}")
+        logger.info(f"Fetching dataset via ERPNextClient: {source_name} ({source_type})")
         try:
-            dataset = client.get_dataset(dataset_name)
-            logger.info(f"Dataset contents:\n{dataset.head()}")
-
-            logger.info("Syncing dataset with selected fields from index 0...")
-            sync_data = get_dataset_with_fields(client, dataset_name)
-            logger.info(f"Synced data:\n{sync_data.head()}")
-
-            return sync_data
-        except Exception as dataset_error:
-            if "404" in str(dataset_error) or "NOT FOUND" in str(dataset_error):
-                logger.warning(
-                    f"Dataset '{dataset_name}' not found in ERP system. This might be expected for some datasets."
+            if source_type == "query_report":
+                dataset = client.get_query_report(
+                    report_name=source_name,
+                    filters=applied_filters or None,
                 )
-                # Return empty DataFrame instead of raising error
+            else:
+                # Standard DocType: fetch with fields=["*"] to get audit attributes (name, modified, creation)
+                dataset = client.get_dataset(
+                    dataset_id=source_name,
+                    fields=["*"],
+                    filters=applied_filters or None,
+                )
+
+            if isinstance(dataset, pd.DataFrame):
+                logger.info(f"Successfully retrieved {len(dataset)} records. Columns: {list(dataset.columns)}")
+                return dataset
+            else:
+                return pd.DataFrame(dataset)
+
+        except Exception as dataset_error:
+            if "404" in str(dataset_error) or "NOT FOUND" in str(dataset_error) or "Does not exist" in str(dataset_error):
+                logger.warning(
+                    f"Dataset '{source_name}' not found in ERP system ({dataset_error}). Returning empty DataFrame."
+                )
                 return pd.DataFrame()
             else:
                 raise dataset_error
 
     except Exception as e:
-        logger.exception("Error while pulling dataset")
+        logger.exception(f"Error while pulling dataset for pipeline '{pipeline_id}': {e}")
         raise
 
 
 if __name__ == "__main__":
-    print(pull_dataset("Soil Collection Data"))
+    print("Testing pull_dataset with Soil Collection Data:")
+    print(pull_dataset("soil_collection"))
+

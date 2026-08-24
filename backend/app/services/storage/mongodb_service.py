@@ -1,11 +1,18 @@
 import math
 from uuid import uuid4
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 from pymongo.collection import Collection
 from bson import ObjectId
 from app.schemas.models import CreateDatasetInformationRequest
-from app.db.database import datasets_collection, dataset_information_collection, users_collection, pipelines_collection, pipelines_history_collection
+from app.db.database import (
+    datasets_collection,
+    dataset_information_collection,
+    users_collection,
+    pipelines_collection,
+    pipelines_history_collection,
+    sync_checkpoints_collection,
+)
 from app.schemas.models import PipelineStatus
 
 
@@ -36,6 +43,113 @@ def get_user_info(user_id: str) -> Dict[str, str]:
         return {"user_name": "", "user_email": ""}
 
 
+def _merge_records(
+    existing_records: List[Dict[str, Any]],
+    incoming_records: List[Dict[str, Any]],
+    identity_key: Optional[str] = "name",
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Merge incoming records into existing records based on identity_key.
+    - If a record with the same identity_key exists, update it in place.
+    - If not, append it.
+    - If identity_key is None or not provided, replace existing with incoming.
+    """
+    if not identity_key or not existing_records:
+        cols = list(incoming_records[0].keys()) if incoming_records else []
+        return list(incoming_records), cols
+
+    merged: List[Dict[str, Any]] = list(existing_records)
+    key_to_idx: Dict[Any, int] = {}
+
+    for idx, rec in enumerate(merged):
+        if isinstance(rec, dict) and identity_key in rec:
+            key_to_idx[rec[identity_key]] = idx
+
+    for inc in incoming_records:
+        if not isinstance(inc, dict):
+            continue
+        key_val = inc.get(identity_key)
+        if key_val is not None and key_val in key_to_idx:
+            target_idx = key_to_idx[key_val]
+            merged[target_idx] = {**merged[target_idx], **inc}
+        else:
+            if key_val is not None:
+                key_to_idx[key_val] = len(merged)
+            merged.append(inc)
+
+    # Union of columns preserving order
+    all_cols = []
+    seen_cols = set()
+    for rec in merged:
+        if isinstance(rec, dict):
+            for k in rec.keys():
+                if k not in seen_cols:
+                    seen_cols.add(k)
+                    all_cols.append(k)
+
+    return merged, all_cols
+
+
+def get_sync_checkpoint(pipeline_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve the latest synchronization checkpoint for a pipeline.
+
+    Args:
+        pipeline_id: Identifier of the pipeline/dataset
+
+    Returns:
+        Checkpoint dictionary or None if no checkpoint exists
+    """
+    if not pipeline_id:
+        return None
+    try:
+        return sync_checkpoints_collection.find_one({"_id": str(pipeline_id)}) or sync_checkpoints_collection.find_one({"pipeline_id": str(pipeline_id)})
+    except Exception as e:
+        print(f"Error fetching sync checkpoint for {pipeline_id}: {e}")
+        return None
+
+
+def update_sync_checkpoint(
+    pipeline_id: str,
+    last_sync_timestamp: str,
+    execution_id: str,
+    record_count: int,
+    status: str = "success",
+    source_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Record/advance a synchronization checkpoint after successful data extraction and persistence.
+
+    Args:
+        pipeline_id: Identifier of the pipeline/dataset
+        last_sync_timestamp: Timestamp watermark of the synced data
+        execution_id: Execution ID of the task
+        record_count: Number of records synced
+        status: 'success' or 'error'
+        source_type: 'doctype' or 'query_report'
+
+    Returns:
+        Updated checkpoint document
+    """
+    current_time = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "_id": str(pipeline_id),
+        "pipeline_id": str(pipeline_id),
+        "last_sync_timestamp": last_sync_timestamp,
+        "last_execution_id": execution_id,
+        "last_successful_record_count": record_count,
+        "sync_status": status,
+        "source_type": source_type,
+        "updated_at": current_time,
+    }
+    sync_checkpoints_collection.update_one(
+        {"_id": str(pipeline_id)},
+        {"$set": doc},
+        upsert=True,
+    )
+    return doc
+
+
 def store_to_mongodb(
     dataset_id: str,
     dataset_name: str,
@@ -44,25 +158,36 @@ def store_to_mongodb(
     user_email: str,
     dataset_records: List[Dict[str, Any]],
     pipeline_id: Optional[str] = None,
+    identity_key: Optional[str] = "name",
+    mode: str = "upsert",
 ) -> Dict[str, Any]:
     current_time = datetime.now(timezone.utc).isoformat()
+    oid = ObjectId(dataset_id) if (dataset_id and ObjectId.is_valid(dataset_id)) else dataset_id
 
     # First check if dataset_id already exists in datasets_collection
-    existing_data_doc = datasets_collection.find_one({"_id": dataset_id})
+    existing_data_doc = datasets_collection.find_one({"_id": oid})
+    if not existing_data_doc and oid != dataset_id:
+        existing_data_doc = datasets_collection.find_one({"_id": dataset_id})
 
     if existing_data_doc:
-        # Update existing dataset data
-        columns = list(dataset_records[0].keys()) if dataset_records else []
+        doc_id = existing_data_doc["_id"]
+        # Merge or replace records based on mode
+        if mode == "upsert" and identity_key:
+            existing_records = existing_data_doc.get("data", [])
+            merged_records, columns = _merge_records(existing_records, dataset_records, identity_key)
+        else:
+            merged_records = dataset_records
+            columns = list(dataset_records[0].keys()) if dataset_records else []
 
         datasets_collection.update_one(
-            {"_id": dataset_id},
-            {"$set": {"data": dataset_records, "columns": columns,
-                      "record_count": len(dataset_records), "updated_at": current_time}},
+            {"_id": doc_id},
+            {"$set": {"data": merged_records, "columns": columns,
+                      "record_count": len(merged_records), "updated_at": current_time}},
         )
 
         # Check if dataset information exists for this dataset_id
         existing_info = dataset_information_collection.find_one(
-            {"dataset_id": dataset_id})
+            {"dataset_id": doc_id}) or dataset_information_collection.find_one({"dataset_id": dataset_id})
 
         if existing_info:
             # Update dataset information
@@ -93,7 +218,11 @@ def store_to_mongodb(
                 "is_spatial": False,
                 "is_temporal": False,
                 "pulled_from_pipeline": True,
-                "pipeline_id": ObjectId(pipeline_id) if pipeline_id else None,
+                "pipeline_id": (
+                    ObjectId(pipeline_id)
+                    if (pipeline_id and ObjectId.is_valid(pipeline_id))
+                    else pipeline_id
+                ),
                 "created_at": current_time,
                 "updated_at": current_time,
                 "user_id": [ObjectId(user_id)],
@@ -106,7 +235,7 @@ def store_to_mongodb(
             "updated": True,
             "dataset_id": dataset_id,
             "dataset_name": dataset_name,
-            "record_count": len(dataset_records),
+            "record_count": len(merged_records),
             "created_at": existing_info["created_at"] if existing_info else current_time,
         }
 
@@ -117,13 +246,18 @@ def store_to_mongodb(
 
         if existing_info and existing_info["dataset_id"] != dataset_id:
             # Dataset name exists but with different ID - update the existing data document
-            columns = list(dataset_records[0].keys()
-                           ) if dataset_records else []
+            existing_doc = datasets_collection.find_one({"_id": existing_info["dataset_id"]})
+            if existing_doc and mode == "upsert" and identity_key:
+                existing_records = existing_doc.get("data", [])
+                merged_records, columns = _merge_records(existing_records, dataset_records, identity_key)
+            else:
+                merged_records = dataset_records
+                columns = list(dataset_records[0].keys()) if dataset_records else []
 
             datasets_collection.update_one(
                 {"_id": existing_info["dataset_id"]},
-                {"$set": {"data": dataset_records, "columns": columns,
-                          "record_count": len(dataset_records), "updated_at": current_time}},
+                {"$set": {"data": merged_records, "columns": columns,
+                          "record_count": len(merged_records), "updated_at": current_time}},
             )
 
             # Update information document
@@ -145,7 +279,7 @@ def store_to_mongodb(
                 "updated": True,
                 "dataset_id": existing_info["dataset_id"],
                 "dataset_name": dataset_name,
-                "record_count": len(dataset_records),
+                "record_count": len(merged_records),
                 "created_at": existing_info["created_at"],
             }
         else:
@@ -183,7 +317,11 @@ def store_to_mongodb(
                 "location_columns": [],
                 "time_columns": [],
                 "pulled_from_pipeline": True,
-                "pipeline_id": ObjectId(pipeline_id) if pipeline_id else None,
+                "pipeline_id": (
+                    ObjectId(pipeline_id)
+                    if (pipeline_id and ObjectId.is_valid(pipeline_id))
+                    else pipeline_id
+                ),
                 "created_at": current_time,
                 "updated_at": current_time,
                 "user_id": [ObjectId(user_id)],

@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
 from app.utils.erp import pull_dataset
-from app.services.storage.mongodb_service import store_to_mongodb
+from app.services.storage.mongodb_service import (
+    store_to_mongodb,
+    get_sync_checkpoint,
+    update_sync_checkpoint,
+)
+from app.config.pipeline_mapping import get_pipeline_config
 from app.config.logging import LoggerMixin
 from app.db.database import datasets_collection, pipelines_collection, pipelines_history_collection
 
@@ -23,24 +28,73 @@ class TaskRunner(LoggerMixin):
         # Add initial "running" entry to pipeline history
         add_pipeline_history_entry(dataset_name, exec_id, "running", user_id)
 
+        target_pipeline_id = pipeline_id or dataset_name
+
         try:
-            # Pull fresh dataset from ERP
-            dataset = pull_dataset(dataset_name)
+            # Determine pipeline config (source_type, sync_strategy, identity_key)
+            config = get_pipeline_config(target_pipeline_id)
+            source_type = config.get("source_type", "doctype")
+            sync_strategy = config.get("sync_strategy", "timestamp" if source_type == "doctype" else "snapshot")
+            identity_key = config.get("identity_key", "name" if source_type == "doctype" else None)
+
+            # Retrieve checkpoint for incremental sync
+            since_timestamp = None
+            if sync_strategy == "timestamp":
+                checkpoint = get_sync_checkpoint(target_pipeline_id)
+                if checkpoint and checkpoint.get("sync_status") == "success":
+                    since_timestamp = checkpoint.get("last_sync_timestamp")
+                    self.logger.info(f"[{exec_id}] Found existing checkpoint for '{target_pipeline_id}': {since_timestamp}")
+                else:
+                    self.logger.info(f"[{exec_id}] No previous successful checkpoint found for '{target_pipeline_id}'. Running initial full sync.")
+
+            # Pull fresh dataset from ERP (incremental if since_timestamp provided)
+            dataset = pull_dataset(target_pipeline_id, since_timestamp=since_timestamp)
             self.logger.info(
                 f"[{exec_id}] Pulled dataset with {len(dataset)} records.")
 
             dataset_json = dataset.to_dict(orient="records")
 
-            # Store/update dataset in MongoDB
+            # Store/update dataset in MongoDB using upsert/merge or snapshot replacement
+            storage_mode = "upsert" if sync_strategy == "timestamp" else "replace"
             result = store_to_mongodb(
-                dataset_id, dataset_name, user_id, "", "", dataset_json, pipeline_id)
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                user_id=user_id,
+                username="",
+                user_email="",
+                dataset_records=dataset_json,
+                pipeline_id=target_pipeline_id,
+                identity_key=identity_key,
+                mode=storage_mode,
+            )
 
             if result.get("updated"):
                 self.logger.info(
-                    f"[{exec_id}] Updated existing dataset {dataset_id} with {len(dataset_json)} records.")
+                    f"[{exec_id}] Updated dataset {dataset_id} (total records in DB: {result.get('record_count')}).")
             elif result.get("inserted"):
                 self.logger.info(
-                    f"[{exec_id}] Created new dataset {dataset_id} with {len(dataset_json)} records.")
+                    f"[{exec_id}] Created new dataset {dataset_id} (total records in DB: {result.get('record_count')}).")
+
+            # Determine latest watermark timestamp to save
+            latest_watermark = datetime.now(timezone.utc).isoformat()
+            if dataset_json and isinstance(dataset_json, list):
+                modified_dates = [
+                    r["modified"] for r in dataset_json
+                    if isinstance(r, dict) and "modified" in r and r["modified"]
+                ]
+                if modified_dates:
+                    latest_watermark = str(max(modified_dates))
+
+            # ONLY advance checkpoint after successful storage
+            update_sync_checkpoint(
+                pipeline_id=target_pipeline_id,
+                last_sync_timestamp=latest_watermark,
+                execution_id=exec_id,
+                record_count=len(dataset_json),
+                status="success",
+                source_type=source_type,
+            )
+            self.logger.info(f"[{exec_id}] Checkpoint advanced to {latest_watermark} for '{target_pipeline_id}'.")
 
             # Update in-memory status
             tasks[exec_id]["status"] = "completed"
@@ -56,9 +110,10 @@ class TaskRunner(LoggerMixin):
             # Update in-memory status
             tasks[exec_id]["status"] = "error"
 
-            # Add "error" entry to pipeline history
+            # Add "error" entry to pipeline history (Checkpoint is NOT advanced)
             add_pipeline_history_entry(
                 dataset_name, exec_id, "error", user_id)
+
 
 
 def add_pipeline_history_entry(pipeline_name: str, exec_id: str, status: str, user_id: str):
