@@ -314,7 +314,7 @@ class User(BaseModel):
     """
     User object.
     """
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "populate_by_name": True}
 
     first_name: Optional[str] = Field(
         None, description="First name of the user")
@@ -324,12 +324,18 @@ class User(BaseModel):
     phone: Optional[str] = Field(None, description="Phone number")
     external_id: str = Field(...,
                              description="External ID from OAuth provider (e.g., Google sub)")
-    role_id: List[PyObjectId] = Field(
-        ..., description="List of Role IDs from roles collection")
+    role_ids: List[PyObjectId] = Field(
+        default_factory=list,
+        alias="role_id",
+        description="List of Role IDs from roles collection")
     created_at: datetime = Field(
         default_factory=datetime.now, description="Timestamp when the user was created")
     updated_at: datetime = Field(
         default_factory=datetime.now, description="Timestamp when the user was last updated")
+
+    @property
+    def role_id(self) -> List[PyObjectId]:
+        return self.role_ids
 
 
 class CreateUserFromOAuth(BaseModel):
@@ -350,7 +356,7 @@ class UserResponse(BaseModel):
     """
     User response object.
     """
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "populate_by_name": True}
 
     id: str = Field(..., description="Unique user ID (UUID)")
     first_name: Optional[str] = Field(
@@ -360,12 +366,18 @@ class UserResponse(BaseModel):
     phone: Optional[str] = Field(None, description="Phone number")
     external_id: str = Field(...,
                              description="External ID from OAuth provider")
-    role_id: List[PyObjectId] = Field(
-        ..., description="List of Role IDs assigned to the user")
+    role_ids: List[PyObjectId] = Field(
+        default_factory=list,
+        alias="role_id",
+        description="List of Role IDs assigned to the user")
     created_at: datetime = Field(...,
                                  description="Timestamp when the user was created")
     updated_at: datetime = Field(...,
                                  description="Timestamp when the user was last updated")
+
+    @property
+    def role_id(self) -> List[PyObjectId]:
+        return self.role_ids
 
 
 class ApiResponse(BaseModel):

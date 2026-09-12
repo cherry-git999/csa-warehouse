@@ -188,22 +188,13 @@ export const FileUploader = forwardRef<
             throw new Error("Failed to get presigned URL");
           }
 
-          // Route presigned URL through Next.js /s3local proxy to avoid browser CORS/PNA issues
-          let targetUrl = upload_url;
-          if (typeof window !== "undefined") {
-            targetUrl = targetUrl.replace(
-              /^http:\/\/(localhost|127\.0\.0\.1):9000/,
-              `${window.location.origin}/s3local`
-            );
-          }
-
           const uploadHeaders: Record<string, string> = {};
           if (file.type) {
             uploadHeaders["Content-Type"] = file.type;
           }
 
-          // Now upload the file using the presigned URL
-          const uploadResponse = await fetch(targetUrl, {
+          // Upload the file directly using the presigned URL
+          const uploadResponse = await fetch(upload_url, {
             method: "PUT",
             body: file,
             headers: uploadHeaders,

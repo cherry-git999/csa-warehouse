@@ -22,7 +22,7 @@ export interface DashboardsResponse {
 export async function fetchDashboards(
   apiToken?: string
 ): Promise<DashboardsResponse> {
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/$/, "");
   if (!backendUrl) {
     throw new Error("NEXT_PUBLIC_BACKEND_URL is not set");
   }
@@ -53,7 +53,7 @@ export async function fetchDashboards(
  * Returns the backend URL that serves the dashboard in an iframe
  */
 export function getDashboardUrl(mountPath: string): string {
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/$/, "");
   if (!backendUrl) {
     throw new Error("NEXT_PUBLIC_BACKEND_URL is not set");
   }

@@ -23,7 +23,7 @@ _mounted_dashboards: Dict[str, dict] = {}
 
 def cleanup_streamlit_processes():
     """Clean up all Streamlit processes on exit"""
-    for process in _streamlit_processes.values():
+    for process in list(_streamlit_processes.values()):
         if process and process.poll() is None:
             try:
                 process.terminate()

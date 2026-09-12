@@ -63,8 +63,9 @@ const authOptions: AuthOptions = {
       if (account?.provider === "google" && account.id_token) {
         try {
           // SECURE: Send the Google ID Token to your backend
+          const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/$/, "");
           const response = await fetch(
-            `${process.env.NEXT_PUBLIC_BACKEND_URL}/users/auth/google`,
+            `${backendUrl}/users/auth/google`,
             {
               method: "POST",
               headers: {

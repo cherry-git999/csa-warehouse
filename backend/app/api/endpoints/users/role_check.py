@@ -48,39 +48,25 @@ def extract_user_id_from_token(authorization: str) -> str:
     raise HTTPException(status_code=401, detail="Invalid access token")
 
 
+from app.auth.rbac import rbac
+
+
 def find_matching_endpoint_access(role: str, path: str):
     """
     Find the most specific endpoint access rule that matches the given path.
+    Delegates to centralized RBAC service.
     """
-    # Get all endpoint access rules for the role
-    from app.db.database import endpoint_access_collection
-
-    all_access = list(endpoint_access_collection.find({"role": role}))
-
-    if not all_access:
-        return None
-
-    # Sort by endpoint specificity (longer paths are more specific)
-    sorted_access = sorted(all_access, key=lambda x: len(x.get("endpoint", "")), reverse=True)
-
-    # Find the first matching endpoint
-    for access in sorted_access:
-        endpoint_pattern = access.get("endpoint", "")
-        if path.startswith(endpoint_pattern):
-            return access
-
-    return None
+    return rbac.find_matching_endpoint_access(role, path)
 
 
 @router.post("/users/role-check", response_model=RoleCheckResponse)
 def check_user_role_access(request: RoleCheckRequest, fastapi_request: Request, authorization: str = Header(None)):
     """
     Check if the current user has access to the requested path based on their role.
+    Uses centralized RBAC service to resolve roles, hierarchy, and permissions.
     """
     try:
         logger.info("Role check requested: path=%s", getattr(request, "path", None))
-        # Initialize default endpoint access if not exists
-        initialize_default_endpoint_access()
 
         # Extract external_id from middleware if available; fallback to header
         external_id = getattr(fastapi_request.state, "external_id", None)
@@ -94,44 +80,8 @@ def check_user_role_access(request: RoleCheckRequest, fastapi_request: Request, 
             logger.warning("User not found for external_id=%s", external_id)
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Get user's role
-        role_ids = user.get("role_id")
-        role_name = "user"
-        if role_ids:
-            # Handle both list of IDs and single ID cases
-            if not isinstance(role_ids, list):
-                role_ids = [role_ids]
-            
-            roles_found = []
-            for r_id in role_ids:
-                role = get_role_by_id(r_id)
-                if role and role.get("role_name"):
-                    roles_found.append(role["role_name"])
-            
-            # Select the most privileged role if multiple exist
-            if "superadmin" in roles_found:
-                role_name = "superadmin"
-            elif "admin" in roles_found:
-                role_name = "admin"
-            elif roles_found:
-                role_name = roles_found[0]
-        logger.debug("User role resolved: role_ids=%s role_name=%s", role_ids, role_name)
-
-        # Find matching endpoint access rule
-        endpoint_access = find_matching_endpoint_access(role_name, request.path)
-        logger.debug("Matched endpoint access: %s", endpoint_access)
-
-        if not endpoint_access:
-            # No access rule found, deny access
-            logger.info("No endpoint access rule found: role=%s path=%s", role_name, request.path)
-            return RoleCheckResponse(viewer=False, contributor=False, admin=False, role_name=role_name)
-
-        return RoleCheckResponse(
-            viewer=endpoint_access.get("viewer", False),
-            contributor=endpoint_access.get("contributor", False),
-            admin=endpoint_access.get("admin", False),
-            role_name=role_name,
-        )
+        # Evaluate permissions using centralized RBAC
+        return rbac.check_access(user, request.path)
 
     except HTTPException as http_exc:
         logger.warning("HTTPException during role check: status=%s detail=%s", http_exc.status_code, http_exc.detail)

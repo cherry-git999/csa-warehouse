@@ -25,16 +25,74 @@
     },
     // Use 'forwardPorts' to make a list of ports inside the container available locally.
     "forwardPorts": [
-        5432,
-        27017,
-        9000,
-        9001,
+        3000,
+        8000,
         8501,
         8502,
         8503,
         8504,
-        8505
+        8505,
+        8506,
+        8507,
+        9000,
+        9001,
+        27017,
+        5432
     ],
+    "portsAttributes": {
+        "3000": {
+            "label": "Frontend (Next.js)",
+            "onAutoForward": "notify"
+        },
+        "8000": {
+            "label": "Backend (FastAPI)",
+            "onAutoForward": "silent"
+        },
+        "8501": {
+            "label": "Dashboard: Purchase & Sales",
+            "onAutoForward": "silent"
+        },
+        "8502": {
+            "label": "Dashboard: Revenue Analysis",
+            "onAutoForward": "silent"
+        },
+        "8503": {
+            "label": "Dashboard: Stock Movement",
+            "onAutoForward": "silent"
+        },
+        "8504": {
+            "label": "Dashboard: Kisan Mitra",
+            "onAutoForward": "silent"
+        },
+        "8505": {
+            "label": "Dashboard: Stock Inventory",
+            "onAutoForward": "silent"
+        },
+        "8506": {
+            "label": "Dashboard: Farmer Income",
+            "onAutoForward": "silent"
+        },
+        "8507": {
+            "label": "Dashboard: NF Coordinator",
+            "onAutoForward": "silent"
+        },
+        "9000": {
+            "label": "MinIO API (S3)",
+            "onAutoForward": "silent"
+        },
+        "9001": {
+            "label": "MinIO Console",
+            "onAutoForward": "silent"
+        },
+        "27017": {
+            "label": "MongoDB",
+            "onAutoForward": "silent"
+        },
+        "5432": {
+            "label": "PostgreSQL",
+            "onAutoForward": "silent"
+        }
+    },
     // Configure tool-specific properties.
     "customizations": {
         // Configure properties specific to VS Code.

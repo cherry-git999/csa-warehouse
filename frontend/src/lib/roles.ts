@@ -14,7 +14,7 @@ export async function checkRole(
   pathname: string,
 ): Promise<RoleCheckResponse | null> {
   try {
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/$/, "");
     const url = `${backendUrl}/users/role-check`;
     console.log("[roles.ts] Role check request:", {
       url,

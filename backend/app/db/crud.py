@@ -43,10 +43,15 @@ def mongo_user_doc_to_dict(doc: dict):
     normalized = dict(doc)
     if "_id" in normalized:
         normalized["_id"] = str(normalized["_id"])
-    # Convert role_id ObjectIds to strings for API responses
-    if "role_id" in normalized and normalized["role_id"]:
-        normalized["role_id"] = [str(role_id)
-                                 for role_id in normalized["role_id"]]
+    # Convert role_ids / role_id ObjectIds to strings for API responses
+    raw_roles = normalized.get("role_ids")
+    if raw_roles is None:
+        raw_roles = normalized.get("role_id")
+    if raw_roles:
+        if not isinstance(raw_roles, list):
+            raw_roles = [raw_roles]
+        normalized["role_ids"] = [str(r) for r in raw_roles]
+        normalized["role_id"] = normalized["role_ids"]
     return normalized
 
 
@@ -67,7 +72,7 @@ def create_user_from_oauth(user_data: CreateUserFromOAuth):
         email=user_data.email,
         phone=user_data.phone,
         external_id=user_data.external_id,
-        role_id=[str(default_role_id)] if default_role_id else [],
+        role_ids=[str(default_role_id)] if default_role_id else [],
         created_at=now,
         updated_at=now,
     )

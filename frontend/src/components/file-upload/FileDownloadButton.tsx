@@ -67,28 +67,13 @@ const FileDownloadButton = React.forwardRef<
         });
 
         const presignedUrlData = response.data as { upload_url?: string; object_name?: string };
-        const rawUrl = presignedUrlData?.upload_url;
-        const objectName = presignedUrlData?.object_name;
+        const downloadUrl = presignedUrlData?.upload_url;
 
-        if (!rawUrl && !objectName) {
-          throw new Error("Failed to get file URL");
+        if (!downloadUrl) {
+          throw new Error("Failed to get file download URL");
         }
 
-        // Clean query parameters to avoid signature mismatch on GET requests
-        let cleanUrl = rawUrl ? rawUrl.split("?")[0] : "";
-        if (!cleanUrl && objectName) {
-          cleanUrl = `http://localhost:9000/uploads/${objectName}`;
-        }
-
-        // Route through /s3local proxy for same-origin fetch in browser
-        if (typeof window !== "undefined") {
-          cleanUrl = cleanUrl.replace(
-            /^http:\/\/(localhost|127\.0\.0\.1):9000/,
-            `${window.location.origin}/s3local`
-          );
-        }
-
-        const fileResponse = await fetch(cleanUrl);
+        const fileResponse = await fetch(downloadUrl);
         if (!fileResponse.ok) {
           throw new Error(`Failed to fetch file (status ${fileResponse.status})`);
         }
