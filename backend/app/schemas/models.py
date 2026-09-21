@@ -202,7 +202,7 @@ class PipelineHistoryDocument(BaseModel):
 
 class PipelineItem(BaseModel):
     """Internal model for database operations with ObjectId support"""
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "populate_by_name": True}
 
     id: str = Field(..., alias="_id",
                     description="MongoDB unique identifier of the pipeline")
@@ -210,7 +210,13 @@ class PipelineItem(BaseModel):
     is_enabled: bool = Field(...,
                              description="Whether the pipeline is enabled")
     pipeline_status: PipelineStatus = Field(
-        ..., description="Status of the pipeline")
+        default=PipelineStatus.NULL, description="Status of the pipeline")
+    history: Optional[List[Dict[str, Any]]] = Field(
+        default=None, description="Pipeline execution history entries")
+    history_ids: Optional[List[str]] = Field(
+        default=None, description="History entry IDs")
+    latest_execution: Optional[Dict[str, Any]] = Field(
+        default=None, description="Latest execution details")
 
 
 class RunPipelineRequest(BaseModel):
@@ -243,6 +249,34 @@ class HistoryItem(BaseModel):
 class PipelineStatusResponse(BaseModel):
     # history: List[HistoryItem] = Field(..., description = "List of matching pipeline execution history items")
     status: PipelineStatus = Field(..., description="Status of the pipeline")
+
+
+class ExecutionLogRecord(BaseModel):
+    """Record matching the frontend table format for pipeline execution logs"""
+    id: str = Field(..., description="Execution ID")
+    commands: str = Field(..., description="Pipeline name / command")
+    dateTime: str = Field(..., description="Formatted or ISO timestamp")
+    user: str = Field(..., description="User name or email")
+    status: str = Field(..., description="Status string (Running, Completed, Error)")
+    duration: str = Field(..., description="Duration string (e.g. 12s or --)")
+    pipeline_id: Optional[str] = Field(None, description="Associated pipeline ID")
+    created_at: Optional[str] = Field(None, description="ISO timestamp of creation")
+    updated_at: Optional[str] = Field(None, description="ISO timestamp of update")
+    error: Optional[str] = Field(None, description="Error message if execution failed")
+
+
+class PipelineStatistics(BaseModel):
+    """Aggregate statistics derived directly from execution history"""
+    total_executions: int = Field(default=0, description="Total pipeline executions")
+    successful_executions: int = Field(default=0, description="Successful executions")
+    failed_executions: int = Field(default=0, description="Failed executions")
+    running_executions: int = Field(default=0, description="Currently running executions")
+
+
+class PipelineHistoryResponse(BaseModel):
+    """Response containing aggregate statistics and detailed execution history"""
+    statistics: PipelineStatistics
+    executions: List[ExecutionLogRecord]
 
 
 class GetPipelinesResponse(BaseModel):

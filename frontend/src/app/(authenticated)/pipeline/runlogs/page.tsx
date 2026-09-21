@@ -19,6 +19,7 @@ export type PipelineStatus = "running" | "completed" | "error" | "null";
 export default function RunLogs() {
   const [pipelines, setPipelines] = useState<PipelineItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
   const { data: session } = useSession();
 
   useEffect(() => {
@@ -54,6 +55,10 @@ export default function RunLogs() {
     fetchPipelines();
   }, [session?.user?.apiToken]);
 
+  const filteredPipelines = pipelines.filter((p) =>
+    p.pipeline_name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
   return (
     <ContentLayout title="Pipelines">
       <div className="h-full flex flex-col p-6">
@@ -68,22 +73,33 @@ export default function RunLogs() {
           <>
             <div className="relative mb-8">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input type="search" placeholder="Search ..." className="pl-9" />
+              <Input
+                type="search"
+                placeholder="Search pipelines..."
+                className="pl-9"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
             </div>
             <h4 className="text-lg font-semibold mb-4">Technical Commands</h4>
             <div className="space-y-4">
-              {pipelines.length === 0 ? (
+              {filteredPipelines.length === 0 ? (
                 <div className="text-center py-8">
-                  <p className="text-gray-500">No pipelines found</p>
+                  <p className="text-gray-500">
+                    {pipelines.length === 0
+                      ? "No pipelines found"
+                      : "No pipelines match search query"}
+                  </p>
                 </div>
               ) : (
-                pipelines.map((pipeline) => (
+                filteredPipelines.map((pipeline) => (
                   <Pipeline
                     key={pipeline._id}
                     _id={pipeline._id}
                     pipeline_name={pipeline.pipeline_name}
                     is_enabled={pipeline.is_enabled}
                     pipeline_status={pipeline.pipeline_status}
+                    latest_execution={(pipeline as any).latest_execution}
                   />
                 ))
               )}

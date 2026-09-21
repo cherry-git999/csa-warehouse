@@ -595,7 +595,7 @@ def create_manual_dataset(request: CreateDatasetInformationRequest) -> Dict[str,
 def get_pipelines() -> List[Dict[str, Any]]:
     """
     Get all pipelines with simplified fields for frontend consumption.
-    Returns pipelines with id, pipeline_name, is_enabled, and pipeline_status.
+    Returns pipelines with id, pipeline_name, is_enabled, pipeline_status, and latest_execution.
 
     Returns:
         List of dictionaries containing pipeline information
@@ -605,15 +605,19 @@ def get_pipelines() -> List[Dict[str, Any]]:
         pipelines = []
 
         for doc in existing_pipelines:
-            # Get the latest execution status from history
-            history_array = doc.get("history", [])
+            # Backward-compatible check for history and history_ids
+            history_array = doc.get("history") or doc.get("history_ids") or []
             pipeline_status = PipelineStatus.NULL
+            latest_exec = None
 
             if history_array:
                 # Get the most recent history entry
-                latest_history = pipelines_history_collection.find_one(
-                    {"_id": history_array[-1]}
-                )
+                latest_hid = history_array[-1]
+                hist_query = [{"_id": latest_hid}]
+                if ObjectId.is_valid(str(latest_hid)):
+                    hist_query.append({"_id": ObjectId(str(latest_hid))})
+
+                latest_history = pipelines_history_collection.find_one({"$or": hist_query})
                 if latest_history:
                     status = latest_history.get("status")
                     # Map database status to frontend status
@@ -621,16 +625,25 @@ def get_pipelines() -> List[Dict[str, Any]]:
                         pipeline_status = PipelineStatus.RUNNING
                     elif status in ["completed", "success"]:
                         pipeline_status = PipelineStatus.COMPLETED
-                    elif status == "failed":
+                    elif status in ["failed", "error"]:
                         pipeline_status = PipelineStatus.ERROR
                     else:
                         pipeline_status = PipelineStatus.NULL
+
+                    latest_exec = {
+                        "execution_id": latest_history.get("execution_id") or latest_history.get("exec_id"),
+                        "status": pipeline_status.value,
+                        "created_at": latest_history.get("created_at"),
+                        "updated_at": latest_history.get("updated_at"),
+                        "error": latest_history.get("error"),
+                    }
 
             pipelines.append({
                 "_id": str(doc.get("_id")),
                 "pipeline_name": doc.get("pipeline_name"),
                 "is_enabled": bool(doc.get("is_enabled", True)),
-                "pipeline_status": pipeline_status
+                "pipeline_status": pipeline_status,
+                "latest_execution": latest_exec,
             })
 
         return pipelines

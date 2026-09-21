@@ -41,11 +41,11 @@ LOGO_PATH = Path(__file__).parent / "assets" / "images" / "csalogo.png"
 initialize_page()
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
-@st.cache_data
+# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
 def load_nf_data() -> pd.DataFrame:
     """
     Load NF Coordinator activity data from MongoDB collection 'nf_coordinator_activities'.
+    Always reads the fresh state from the MongoDB datastore without stale caching.
     Falls back to local CSV reference data only if MongoDB collection is empty.
     """
     df = load_dashboard_data_from_mongodb("nf_coordinator_activities")
@@ -88,6 +88,9 @@ st.sidebar.markdown(
     """<div class="sidebar-header">NF Coordinator Dashboard</div>""",
     unsafe_allow_html=True,
 )
+
+if st.sidebar.button("🔄 Refresh Data", key="refresh_nf_btn"):
+    st.rerun()
 st.markdown(
     """
     <style>

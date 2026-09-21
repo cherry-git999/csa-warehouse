@@ -17,7 +17,11 @@ TODO – MongoDB migration:
 """
 
 import base64
-from utilities import initialize_page, load_dashboard_data_from_mongodb
+from utilities import (
+    initialize_page,
+    load_dashboard_data_from_mongodb,
+    trigger_warehouse_auto_sync,
+)
 
 import pandas as pd
 import plotly.express as px
@@ -48,15 +52,16 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
-@st.cache_data(ttl=10)
-def load_data(force_sync: bool = True) -> pd.DataFrame:
+# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
+def load_data(force_sync: bool = False) -> pd.DataFrame:
     """
     Load stock movement data from MongoDB collection 'stock_movement'.
-    Triggers automatic synchronization with ERPNext to ensure latest data.
+    Always reads the fresh state from the MongoDB datastore without stale caching.
     Falls back to local CSV reference data only if MongoDB collection is empty.
     """
-    df = load_dashboard_data_from_mongodb("stock_movement", auto_sync=force_sync)
+    if force_sync:
+        trigger_warehouse_auto_sync("stock_movement")
+    df = load_dashboard_data_from_mongodb("stock_movement", auto_sync=False)
 
     if df is None or df.empty:
         if DATA_CSV.exists():
@@ -68,6 +73,14 @@ def load_data(force_sync: bool = True) -> pd.DataFrame:
     df["year"] = df["date"].dt.year.astype(str)
     return df
 
+
+# ── Auto-sync with ERP on open/refresh (once per session initialization) ───────
+try:
+    if "auto_synced" not in st.session_state:
+        trigger_warehouse_auto_sync("stock_movement")
+        st.session_state["auto_synced"] = True
+except Exception:
+    pass
 
 df = load_data()
 
@@ -91,8 +104,11 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
+if st.sidebar.button("🔄 Refresh Data", key="refresh_movement_btn"):
+    st.rerun()
+
 if st.sidebar.button("🔄 Sync with ERP", key="sync_movement_btn"):
-    st.cache_data.clear()
+    trigger_warehouse_auto_sync("stock_movement")
     st.rerun()
 
 st.markdown(

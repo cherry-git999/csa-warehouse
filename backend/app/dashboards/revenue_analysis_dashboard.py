@@ -49,11 +49,11 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback ────────────────
-@st.cache_data
+# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
 def load_data() -> pd.DataFrame:
     """
     Load revenue analysis data from MongoDB collection 'revenue_analysis'.
+    Always reads the fresh state from the MongoDB datastore without stale caching.
     Falls back to local CSV reference data only if MongoDB collection is empty.
     """
     df = load_dashboard_data_from_mongodb("revenue_analysis")
@@ -91,6 +91,9 @@ st.sidebar.markdown(
     """<div class="sidebar-header">Revenue Analysis</div>""",
     unsafe_allow_html=True,
 )
+
+if st.sidebar.button("🔄 Refresh Data", key="refresh_ra_btn"):
+    st.rerun()
 st.markdown(
     """
     <style>

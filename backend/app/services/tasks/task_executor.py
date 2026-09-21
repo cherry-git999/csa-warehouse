@@ -1,8 +1,9 @@
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import pandas as pd
+from bson import ObjectId
 
 from app.utils.erp import pull_dataset
 from app.services.storage.mongodb_service import (
@@ -27,10 +28,10 @@ class TaskRunner(LoggerMixin):
             f"[Thread: {threading.current_thread().name}] Starting task {exec_id} for dataset {dataset_id}"
         )
 
-        # Add initial "running" entry to pipeline history
-        add_pipeline_history_entry(dataset_name, exec_id, "running", user_id)
-
         target_pipeline_id = pipeline_id or dataset_name
+
+        # Add initial "running" entry to pipeline history
+        add_pipeline_history_entry(dataset_name, exec_id, "running", user_id, pipeline_id=target_pipeline_id)
 
         try:
             # Determine pipeline config (source_type, sync_strategy, identity_key, mapper)
@@ -115,7 +116,8 @@ class TaskRunner(LoggerMixin):
 
             # Add "completed" entry to pipeline history
             add_pipeline_history_entry(
-                dataset_name, exec_id, "completed", user_id)
+                dataset_name, exec_id, "completed", user_id, pipeline_id=target_pipeline_id
+            )
 
         except Exception as e:
             self.logger.error(
@@ -126,77 +128,111 @@ class TaskRunner(LoggerMixin):
 
             # Add "error" entry to pipeline history (Checkpoint is NOT advanced)
             add_pipeline_history_entry(
-                dataset_name, exec_id, "error", user_id)
+                dataset_name, exec_id, "error", user_id, pipeline_id=target_pipeline_id, error=str(e)
+            )
 
 
 
-def add_pipeline_history_entry(pipeline_name: str, exec_id: str, status: str, user_id: str):
+def add_pipeline_history_entry(
+    pipeline_name: str,
+    exec_id: str,
+    status: str,
+    user_id: str,
+    pipeline_id: Optional[str] = None,
+    error: Optional[str] = None,
+):
     try:
         current_time = datetime.now(timezone.utc).isoformat()
 
-        # Check if pipeline exists
-        existing_pipeline = pipelines_collection.find_one(
-            {"pipeline_name": pipeline_name})
+        # Safely resolve pipeline by pipeline_id (polymorphic) or pipeline_name
+        existing_pipeline = None
+        if pipeline_id:
+            id_queries = [{"_id": pipeline_id}]
+            if ObjectId.is_valid(str(pipeline_id)):
+                id_queries.append({"_id": ObjectId(str(pipeline_id))})
+            existing_pipeline = pipelines_collection.find_one({"$or": id_queries})
+
+        if not existing_pipeline and pipeline_name:
+            existing_pipeline = pipelines_collection.find_one(
+                {"pipeline_name": pipeline_name})
 
         if existing_pipeline:
-            pipeline_id = existing_pipeline["_id"]
+            actual_pipeline_id = existing_pipeline["_id"]
+            resolved_name = existing_pipeline.get("pipeline_name", pipeline_name)
 
             # Check if history entry already exists for this execution
             existing_history = pipelines_history_collection.find_one({
-                "execution_id": exec_id
+                "$or": [{"execution_id": exec_id}, {"exec_id": exec_id}]
             })
 
             if existing_history:
                 # Update existing history entry
+                update_fields = {
+                    "status": status,
+                    "updated_at": current_time,
+                }
+                if error is not None:
+                    update_fields["error"] = error
                 pipelines_history_collection.update_one(
                     {"_id": existing_history["_id"]},
-                    {
-                        "$set": {
-                            "status": status,
-                            "updated_at": current_time
-                        }
-                    }
+                    {"$set": update_fields}
                 )
             else:
                 # Create new history document
                 history_doc = {
                     "execution_id": exec_id,
+                    "exec_id": exec_id,
+                    "pipeline_id": str(actual_pipeline_id),
+                    "pipeline_name": resolved_name,
+                    "user_id": user_id,
                     "status": status,
                     "created_at": current_time,
-                    "updated_at": current_time
+                    "updated_at": current_time,
+                    "error": error if error else None,
                 }
                 history_result = pipelines_history_collection.insert_one(
                     history_doc)
 
                 # Add history document ID to pipeline's history array
+                # If pipeline specifically only has history_ids, write to history_ids; otherwise write to canonical history
+                if "history_ids" in existing_pipeline and "history" not in existing_pipeline:
+                    update_query = {"$push": {"history_ids": history_result.inserted_id}}
+                else:
+                    update_query = {"$push": {"history": history_result.inserted_id}}
                 pipelines_collection.update_one(
-                    {"_id": pipeline_id},
-                    {"$push": {"history": history_result.inserted_id}}
+                    {"_id": actual_pipeline_id},
+                    update_query
                 )
         else:
-            # Create new pipeline first
+            # Create new pipeline document
+            new_id = pipeline_id if pipeline_id else str(uuid.uuid4())
             pipeline_doc = {
-                "_id": str(uuid.uuid4()),
+                "_id": new_id,
                 "pipeline_name": pipeline_name,
                 "is_enabled": True,
                 "history": []
             }
             pipeline_result = pipelines_collection.insert_one(pipeline_doc)
-            pipeline_id = pipeline_result.inserted_id
+            actual_pipeline_id = pipeline_result.inserted_id
 
             # Create history document
             history_doc = {
                 "execution_id": exec_id,
+                "exec_id": exec_id,
+                "pipeline_id": str(actual_pipeline_id),
+                "pipeline_name": pipeline_name,
+                "user_id": user_id,
                 "status": status,
                 "created_at": current_time,
-                "updated_at": current_time
+                "updated_at": current_time,
+                "error": error if error else None,
             }
             history_result = pipelines_history_collection.insert_one(
                 history_doc)
 
-            # Add history document ID to pipeline's history array
+            # Add history document ID to pipeline's canonical history array
             pipelines_collection.update_one(
-                {"_id": pipeline_id},
+                {"_id": actual_pipeline_id},
                 {"$push": {"history": history_result.inserted_id}}
             )
 
