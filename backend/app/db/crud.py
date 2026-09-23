@@ -10,13 +10,26 @@ def user_to_dict(user: User):
 
     - Do not set `_id`; let MongoDB auto-generate ObjectId
     - Exclude `id` if None
-    - Convert role_id strings to ObjectIds for MongoDB storage
+    - Convert role_ids / role_id strings to ObjectIds for MongoDB storage
     """
     user_dict = user.model_dump(exclude_none=True)
-    # Convert role_id strings to ObjectIds for MongoDB storage
-    if 'role_id' in user_dict and user_dict['role_id']:
-        user_dict['role_id'] = [ObjectId(role_id)
-                                for role_id in user_dict['role_id']]
+    # Convert role_ids / role_id strings to ObjectIds for MongoDB storage
+    for key in ('role_ids', 'role_id'):
+        if key in user_dict and user_dict[key]:
+            converted = []
+            for r_id in user_dict[key]:
+                try:
+                    converted.append(ObjectId(str(r_id)))
+                except Exception:
+                    converted.append(str(r_id))
+            user_dict[key] = converted
+
+    # Maintain dual field compatibility in MongoDB
+    if 'role_ids' in user_dict and 'role_id' not in user_dict:
+        user_dict['role_id'] = user_dict['role_ids']
+    elif 'role_id' in user_dict and 'role_ids' not in user_dict:
+        user_dict['role_ids'] = user_dict['role_id']
+
     return user_dict
 
 
