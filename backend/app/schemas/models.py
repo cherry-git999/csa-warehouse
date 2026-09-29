@@ -166,18 +166,18 @@ class DatasetInfoResponse(BaseModel):
 
 # --------------------------------- /pipelines ---------------------------------
 
-class PipelineStatus(str, Enum):
-    """Enum for pipeline status values"""
-    RUNNING = "running"
-    COMPLETED = "completed"
-    ERROR = "error"
-    NULL = "null"
+from app.services.storage.storage_keys import PipelineStatus
+
+
+# --------------------------------- /pipelines ---------------------------------
 
 
 class PipelineHistoryItem(BaseModel):
-    exec_id: str = Field(..., description="Execution ID of the pipeline run")
+    model_config = {"populate_by_name": True}
+
+    execution_id: str = Field(..., description="Execution ID of the pipeline run")
     status: PipelineStatus = Field(
-        ..., description="Status of the execution (success, failed, running, completed)")
+        ..., description="Status of the execution (running, completed, error, null)")
     user_id: str = Field(..., description="User ID who executed the pipeline")
     created_at: datetime = Field(...,
                                  description="Timestamp when the pipeline execution was created")
@@ -187,11 +187,11 @@ class PipelineHistoryItem(BaseModel):
 
 class PipelineHistoryDocument(BaseModel):
     """Schema for documents in the pipelines_history collection"""
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "populate_by_name": True}
 
-    exec_id: str = Field(..., description="Execution ID of the pipeline run")
+    execution_id: str = Field(..., description="Execution ID of the pipeline run")
     status: PipelineStatus = Field(
-        ..., description="Status of the execution (success, failed, running, completed)")
+        ..., description="Status of the execution (running, completed, error, null)")
     user_id: ObjectId = Field(...,
                               description="User ID who executed the pipeline")
     created_at: datetime = Field(...,
@@ -237,10 +237,12 @@ class RunPipelineResponse(BaseModel):
 
 
 class HistoryItem(BaseModel):
-    exec_id: str = Field(...,
-                         description="Unique execution ID of the pipeline run")
+    model_config = {"populate_by_name": True}
+
+    execution_id: str = Field(...,
+                              description="Unique execution ID of the pipeline run")
     status: PipelineStatus = Field(
-        ..., description="Status of the pipeline run (running, success, failed, error)")
+        ..., description="Status of the pipeline run (running, completed, error, null)")
     executed_at: str = Field(...,
                              description="ISO formatted timestamp of execution")
     user: str = Field(..., description="User who executed the pipeline")

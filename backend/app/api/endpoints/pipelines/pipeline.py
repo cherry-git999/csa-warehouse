@@ -2,9 +2,13 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from datetime import datetime
 from app.db.database import pipelines_collection, pipelines_history_collection, users_collection
 from app.services.storage.mongodb_service import get_pipelines
+from app.services.storage.storage_keys import (
+    PipelineStatus,
+    PipelineStorageKeys,
+    PipelineDisplayStatus,
+)
 from app.schemas.models import (
     RunPipelineRequest,
-    PipelineStatus,
     RunPipelineResponse,
     GetPipelinesResponse,
     PipelineHistoryResponse,
@@ -34,7 +38,7 @@ def run_pipeline(request: RunPipelineRequest, fastapi_request: Request, current_
         user_id=str(current_user.get("_id")),
         pipeline_id=request.pipeline_id,
     )
-    status = result.get("status", "running")
+    status = result.get("status", PipelineStatus.RUNNING.value)
     executed_at = result.get("executed_at")
     return RunPipelineResponse(status=status, execution_id=exec_id, executed_at=executed_at)
 
@@ -51,24 +55,21 @@ def get_pipeline_status(pipeline_id: str, execution_id: str, current_user: dict 
         raise HTTPException(
             status_code=404, detail="No pipeline with the given pipeline_id")
 
-    # Safely query history by execution_id or exec_id
+    # Query history by canonical execution_id
     history_doc = pipelines_history_collection.find_one({
-        "$or": [
-            {"execution_id": execution_id},
-            {"exec_id": execution_id}
-        ]
+        PipelineStorageKeys.EXECUTION_ID: execution_id
     })
 
     if not history_doc:
         raise HTTPException(
             status_code=404, detail="No history available with the given execution_id")
 
-    raw_status = history_doc.get("status", "null")
-    if raw_status in ["completed", "success"]:
+    raw_status = history_doc.get(PipelineStorageKeys.STATUS, PipelineStatus.NULL.value)
+    if raw_status == PipelineStatus.COMPLETED.value:
         return PipelineStatus.COMPLETED
-    elif raw_status in ["failed", "error"]:
+    elif raw_status == PipelineStatus.ERROR.value:
         return PipelineStatus.ERROR
-    elif raw_status == "running":
+    elif raw_status == PipelineStatus.RUNNING.value:
         return PipelineStatus.RUNNING
     else:
         return PipelineStatus.NULL
@@ -82,13 +83,13 @@ def get_filtered_pipelines(
 ) -> GetPipelinesResponse:
     match_stage = {}
     if pipeline:
-        match_stage["pipeline_name"] = {"$regex": pipeline, "$options": "i"}
+        match_stage[PipelineStorageKeys.NAME] = {"$regex": pipeline, "$options": "i"}
 
     pipelines_cursor = pipelines_collection.find(match_stage)
     pipelines = []
 
     for doc in pipelines_cursor:
-        history_ids = doc.get("history") or doc.get("history_ids") or []
+        history_ids = doc.get(PipelineStorageKeys.HISTORY, [])
         history = []
         latest_status = PipelineStatus.NULL
 
@@ -99,31 +100,31 @@ def get_filtered_pipelines(
             history_doc = pipelines_history_collection.find_one({"$or": hist_queries})
 
             if history_doc:
-                exec_id = history_doc.get("execution_id") or history_doc.get("exec_id") or str(history_doc.get("_id"))
-                st = history_doc.get("status")
-                if st in ["completed", "success"]:
+                exec_id = history_doc.get(PipelineStorageKeys.EXECUTION_ID) or str(history_doc.get(PipelineStorageKeys.ID))
+                st = history_doc.get(PipelineStorageKeys.STATUS)
+                if st == PipelineStatus.COMPLETED.value:
                     latest_status = PipelineStatus.COMPLETED
-                elif st in ["failed", "error"]:
+                elif st == PipelineStatus.ERROR.value:
                     latest_status = PipelineStatus.ERROR
-                elif st == "running":
+                elif st == PipelineStatus.RUNNING.value:
                     latest_status = PipelineStatus.RUNNING
 
-                user_details = get_user_details(history_doc.get("user_id"))
+                user_details = get_user_details(history_doc.get(PipelineStorageKeys.USER_ID))
                 record = {
-                    "_id": str(history_doc.get("_id")),
-                    "exec_id": exec_id,
+                    "_id": str(history_doc.get(PipelineStorageKeys.ID)),
+                    "execution_id": exec_id,
                     "status": st,
                     "first_name": user_details["first_name"],
                     "last_name": user_details["last_name"],
                     "email": user_details["email"],
-                    "created_at": history_doc.get("created_at"),
-                    "updated_at": history_doc.get("updated_at"),
+                    "created_at": history_doc.get(PipelineStorageKeys.CREATED_AT),
+                    "updated_at": history_doc.get(PipelineStorageKeys.UPDATED_AT),
                 }
 
                 if date:
                     try:
                         filter_date = datetime.fromisoformat(date).isoformat()
-                        if history_doc.get("created_at", "") >= filter_date:
+                        if history_doc.get(PipelineStorageKeys.CREATED_AT, "") >= filter_date:
                             history.append(record)
                     except ValueError:
                         history.append(record)
@@ -132,9 +133,9 @@ def get_filtered_pipelines(
 
         pipelines.append(
             {
-                "_id": str(doc.get("_id")),
-                "pipeline_name": doc.get("pipeline_name"),
-                "is_enabled": doc.get("is_enabled", True),
+                "_id": str(doc.get(PipelineStorageKeys.ID)),
+                "pipeline_name": doc.get(PipelineStorageKeys.NAME),
+                "is_enabled": doc.get(PipelineStorageKeys.IS_ENABLED, True),
                 "pipeline_status": latest_status,
                 "history_ids": [str(hid) for hid in history_ids],
                 "history": history,
@@ -162,12 +163,12 @@ def get_pipeline_history(
     running_execs = 0
 
     for doc in all_docs:
-        st = str(doc.get("status", "")).lower()
-        if st in ["completed", "success"]:
+        st = str(doc.get(PipelineStorageKeys.STATUS, "")).lower()
+        if st == PipelineStatus.COMPLETED.value:
             successful_execs += 1
-        elif st in ["failed", "error"]:
+        elif st == PipelineStatus.ERROR.value:
             failed_execs += 1
-        elif st == "running":
+        elif st == PipelineStatus.RUNNING.value:
             running_execs += 1
 
     stats = PipelineStatistics(
@@ -188,31 +189,31 @@ def get_pipeline_history(
         names = [pipeline_id]
         ids = [pipeline_id]
         if target_pipe:
-            if target_pipe.get("pipeline_name"):
-                names.append(target_pipe.get("pipeline_name"))
-            ids.append(str(target_pipe.get("_id", "")))
+            if target_pipe.get(PipelineStorageKeys.NAME):
+                names.append(target_pipe.get(PipelineStorageKeys.NAME))
+            ids.append(str(target_pipe.get(PipelineStorageKeys.ID, "")))
 
         filter_query = {
             "$or": [
-                {"pipeline_id": {"$in": ids}},
-                {"pipeline_name": {"$in": names}},
+                {PipelineStorageKeys.PIPELINE_ID: {"$in": ids}},
+                {PipelineStorageKeys.PIPELINE_NAME: {"$in": names}},
             ]
         }
 
     # 3. Retrieve execution records sorted by created_at descending
-    cursor = pipelines_history_collection.find(filter_query).sort("created_at", -1).limit(limit)
+    cursor = pipelines_history_collection.find(filter_query).sort(PipelineStorageKeys.CREATED_AT, -1).limit(limit)
 
     execution_records: List[ExecutionLogRecord] = []
     for doc in cursor:
-        exec_id = doc.get("execution_id") or doc.get("exec_id") or str(doc.get("_id"))
-        pipe_name = doc.get("pipeline_name") or "Unknown Pipeline"
-        created_at_raw = doc.get("created_at", "")
-        updated_at_raw = doc.get("updated_at", "")
-        st = doc.get("status", "null")
+        exec_id = doc.get(PipelineStorageKeys.EXECUTION_ID) or str(doc.get(PipelineStorageKeys.ID))
+        pipe_name = doc.get(PipelineStorageKeys.PIPELINE_NAME) or "Unknown Pipeline"
+        created_at_raw = doc.get(PipelineStorageKeys.CREATED_AT, "")
+        updated_at_raw = doc.get(PipelineStorageKeys.UPDATED_AT, "")
+        st = doc.get(PipelineStorageKeys.STATUS, PipelineStatus.NULL.value)
 
         # Compute duration
         duration_str = "--"
-        if created_at_raw and updated_at_raw and st != "running":
+        if created_at_raw and updated_at_raw and st != PipelineStatus.RUNNING.value:
             try:
                 dt_start = datetime.fromisoformat(created_at_raw)
                 dt_end = datetime.fromisoformat(updated_at_raw)
@@ -231,7 +232,7 @@ def get_pipeline_history(
                 pass
 
         # Format user display
-        user_id = doc.get("user_id")
+        user_id = doc.get(PipelineStorageKeys.USER_ID)
         user_display = "System"
         if user_id:
             try:
@@ -241,14 +242,14 @@ def get_pipeline_history(
             except Exception:
                 user_display = str(user_id)
 
-        # Status capitalization
-        status_disp = "Unknown"
-        if st == "running":
-            status_disp = "Running"
-        elif st in ["completed", "success"]:
-            status_disp = "Completed"
-        elif st in ["failed", "error"]:
-            status_disp = "Error"
+        # Status display formatting
+        status_disp = PipelineDisplayStatus.UNKNOWN
+        if st == PipelineStatus.RUNNING.value:
+            status_disp = PipelineDisplayStatus.RUNNING
+        elif st == PipelineStatus.COMPLETED.value:
+            status_disp = PipelineDisplayStatus.COMPLETED
+        elif st == PipelineStatus.ERROR.value:
+            status_disp = PipelineDisplayStatus.ERROR
 
         execution_records.append(
             ExecutionLogRecord(
@@ -258,10 +259,10 @@ def get_pipeline_history(
                 user=user_display,
                 status=status_disp,
                 duration=duration_str,
-                pipeline_id=doc.get("pipeline_id"),
+                pipeline_id=doc.get(PipelineStorageKeys.PIPELINE_ID),
                 created_at=created_at_raw,
                 updated_at=updated_at_raw,
-                error=doc.get("error"),
+                error=doc.get(PipelineStorageKeys.ERROR),
             )
         )
 

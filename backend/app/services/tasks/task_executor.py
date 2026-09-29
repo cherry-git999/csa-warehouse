@@ -15,6 +15,10 @@ from app.config.pipeline_mapping import get_pipeline_config
 from app.mappings import map_erp_data
 from app.config.logging import LoggerMixin
 from app.db.database import datasets_collection, pipelines_collection, pipelines_history_collection
+from app.services.storage.storage_keys import (
+    PipelineStatus,
+    PipelineStorageKeys,
+)
 
 # In-memory store for task metadata
 tasks: Dict[str, Dict[str, Any]] = {}
@@ -31,7 +35,7 @@ class TaskRunner(LoggerMixin):
         target_pipeline_id = pipeline_id or dataset_name
 
         # Add initial "running" entry to pipeline history
-        add_pipeline_history_entry(dataset_name, exec_id, "running", user_id, pipeline_id=target_pipeline_id)
+        add_pipeline_history_entry(dataset_name, exec_id, PipelineStatus.RUNNING.value, user_id, pipeline_id=target_pipeline_id)
 
         try:
             # Determine pipeline config (source_type, sync_strategy, identity_key, mapper)
@@ -112,11 +116,11 @@ class TaskRunner(LoggerMixin):
             self.logger.info(f"[{exec_id}] Checkpoint advanced to {latest_watermark} for '{target_pipeline_id}'.")
 
             # Update in-memory status
-            tasks[exec_id]["status"] = "completed"
+            tasks[exec_id]["status"] = PipelineStatus.COMPLETED.value
 
             # Add "completed" entry to pipeline history
             add_pipeline_history_entry(
-                dataset_name, exec_id, "completed", user_id, pipeline_id=target_pipeline_id
+                dataset_name, exec_id, PipelineStatus.COMPLETED.value, user_id, pipeline_id=target_pipeline_id
             )
 
         except Exception as e:
@@ -124,11 +128,11 @@ class TaskRunner(LoggerMixin):
                 f"[{exec_id}] Task failed with error: {e}", exc_info=True)
 
             # Update in-memory status
-            tasks[exec_id]["status"] = "error"
+            tasks[exec_id]["status"] = PipelineStatus.ERROR.value
 
             # Add "error" entry to pipeline history (Checkpoint is NOT advanced)
             add_pipeline_history_entry(
-                dataset_name, exec_id, "error", user_id, pipeline_id=target_pipeline_id, error=str(e)
+                dataset_name, exec_id, PipelineStatus.ERROR.value, user_id, pipeline_id=target_pipeline_id, error=str(e)
             )
 
 
@@ -154,25 +158,25 @@ def add_pipeline_history_entry(
 
         if not existing_pipeline and pipeline_name:
             existing_pipeline = pipelines_collection.find_one(
-                {"pipeline_name": pipeline_name})
+                {PipelineStorageKeys.NAME: pipeline_name})
 
         if existing_pipeline:
             actual_pipeline_id = existing_pipeline["_id"]
-            resolved_name = existing_pipeline.get("pipeline_name", pipeline_name)
+            resolved_name = existing_pipeline.get(PipelineStorageKeys.NAME, pipeline_name)
 
             # Check if history entry already exists for this execution
             existing_history = pipelines_history_collection.find_one({
-                "$or": [{"execution_id": exec_id}, {"exec_id": exec_id}]
+                PipelineStorageKeys.EXECUTION_ID: exec_id
             })
 
             if existing_history:
                 # Update existing history entry
                 update_fields = {
-                    "status": status,
-                    "updated_at": current_time,
+                    PipelineStorageKeys.STATUS: status,
+                    PipelineStorageKeys.UPDATED_AT: current_time,
                 }
                 if error is not None:
-                    update_fields["error"] = error
+                    update_fields[PipelineStorageKeys.ERROR] = error
                 pipelines_history_collection.update_one(
                     {"_id": existing_history["_id"]},
                     {"$set": update_fields}
@@ -180,52 +184,45 @@ def add_pipeline_history_entry(
             else:
                 # Create new history document
                 history_doc = {
-                    "execution_id": exec_id,
-                    "exec_id": exec_id,
-                    "pipeline_id": str(actual_pipeline_id),
-                    "pipeline_name": resolved_name,
-                    "user_id": user_id,
-                    "status": status,
-                    "created_at": current_time,
-                    "updated_at": current_time,
-                    "error": error if error else None,
+                    PipelineStorageKeys.EXECUTION_ID: exec_id,
+                    PipelineStorageKeys.PIPELINE_ID: str(actual_pipeline_id),
+                    PipelineStorageKeys.PIPELINE_NAME: resolved_name,
+                    PipelineStorageKeys.USER_ID: user_id,
+                    PipelineStorageKeys.STATUS: status,
+                    PipelineStorageKeys.CREATED_AT: current_time,
+                    PipelineStorageKeys.UPDATED_AT: current_time,
+                    PipelineStorageKeys.ERROR: error if error else None,
                 }
                 history_result = pipelines_history_collection.insert_one(
                     history_doc)
 
-                # Add history document ID to pipeline's history array
-                # If pipeline specifically only has history_ids, write to history_ids; otherwise write to canonical history
-                if "history_ids" in existing_pipeline and "history" not in existing_pipeline:
-                    update_query = {"$push": {"history_ids": history_result.inserted_id}}
-                else:
-                    update_query = {"$push": {"history": history_result.inserted_id}}
+                # Add history document ID to pipeline's canonical history array
                 pipelines_collection.update_one(
                     {"_id": actual_pipeline_id},
-                    update_query
+                    {"$push": {PipelineStorageKeys.HISTORY: history_result.inserted_id}}
                 )
         else:
             # Create new pipeline document
             new_id = pipeline_id if pipeline_id else str(uuid.uuid4())
             pipeline_doc = {
                 "_id": new_id,
-                "pipeline_name": pipeline_name,
-                "is_enabled": True,
-                "history": []
+                PipelineStorageKeys.NAME: pipeline_name,
+                PipelineStorageKeys.IS_ENABLED: True,
+                PipelineStorageKeys.HISTORY: [],
             }
             pipeline_result = pipelines_collection.insert_one(pipeline_doc)
             actual_pipeline_id = pipeline_result.inserted_id
 
             # Create history document
             history_doc = {
-                "execution_id": exec_id,
-                "exec_id": exec_id,
-                "pipeline_id": str(actual_pipeline_id),
-                "pipeline_name": pipeline_name,
-                "user_id": user_id,
-                "status": status,
-                "created_at": current_time,
-                "updated_at": current_time,
-                "error": error if error else None,
+                PipelineStorageKeys.EXECUTION_ID: exec_id,
+                PipelineStorageKeys.PIPELINE_ID: str(actual_pipeline_id),
+                PipelineStorageKeys.PIPELINE_NAME: pipeline_name,
+                PipelineStorageKeys.USER_ID: user_id,
+                PipelineStorageKeys.STATUS: status,
+                PipelineStorageKeys.CREATED_AT: current_time,
+                PipelineStorageKeys.UPDATED_AT: current_time,
+                PipelineStorageKeys.ERROR: error if error else None,
             }
             history_result = pipelines_history_collection.insert_one(
                 history_doc)
@@ -233,7 +230,7 @@ def add_pipeline_history_entry(
             # Add history document ID to pipeline's canonical history array
             pipelines_collection.update_one(
                 {"_id": actual_pipeline_id},
-                {"$push": {"history": history_result.inserted_id}}
+                {"$push": {PipelineStorageKeys.HISTORY: history_result.inserted_id}}
             )
 
     except Exception as e:

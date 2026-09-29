@@ -14,6 +14,7 @@ from app.db.database import (
     sync_checkpoints_collection,
 )
 from app.schemas.models import PipelineStatus
+from app.services.storage.storage_keys import PipelineStorageKeys
 
 
 def get_user_info(user_id: str) -> Dict[str, str]:
@@ -605,8 +606,7 @@ def get_pipelines() -> List[Dict[str, Any]]:
         pipelines = []
 
         for doc in existing_pipelines:
-            # Backward-compatible check for history and history_ids
-            history_array = doc.get("history") or doc.get("history_ids") or []
+            history_array = doc.get(PipelineStorageKeys.HISTORY, [])
             pipeline_status = PipelineStatus.NULL
             latest_exec = None
 
@@ -619,29 +619,29 @@ def get_pipelines() -> List[Dict[str, Any]]:
 
                 latest_history = pipelines_history_collection.find_one({"$or": hist_query})
                 if latest_history:
-                    status = latest_history.get("status")
+                    status = latest_history.get(PipelineStorageKeys.STATUS)
                     # Map database status to frontend status
-                    if status == "running":
+                    if status == PipelineStatus.RUNNING.value:
                         pipeline_status = PipelineStatus.RUNNING
-                    elif status in ["completed", "success"]:
+                    elif status == PipelineStatus.COMPLETED.value:
                         pipeline_status = PipelineStatus.COMPLETED
-                    elif status in ["failed", "error"]:
+                    elif status == PipelineStatus.ERROR.value:
                         pipeline_status = PipelineStatus.ERROR
                     else:
                         pipeline_status = PipelineStatus.NULL
 
                     latest_exec = {
-                        "execution_id": latest_history.get("execution_id") or latest_history.get("exec_id"),
+                        "execution_id": latest_history.get(PipelineStorageKeys.EXECUTION_ID) or str(latest_history.get(PipelineStorageKeys.ID)),
                         "status": pipeline_status.value,
-                        "created_at": latest_history.get("created_at"),
-                        "updated_at": latest_history.get("updated_at"),
-                        "error": latest_history.get("error"),
+                        "created_at": latest_history.get(PipelineStorageKeys.CREATED_AT),
+                        "updated_at": latest_history.get(PipelineStorageKeys.UPDATED_AT),
+                        "error": latest_history.get(PipelineStorageKeys.ERROR),
                     }
 
             pipelines.append({
-                "_id": str(doc.get("_id")),
-                "pipeline_name": doc.get("pipeline_name"),
-                "is_enabled": bool(doc.get("is_enabled", True)),
+                "_id": str(doc.get(PipelineStorageKeys.ID)),
+                "pipeline_name": doc.get(PipelineStorageKeys.NAME),
+                "is_enabled": bool(doc.get(PipelineStorageKeys.IS_ENABLED, True)),
                 "pipeline_status": pipeline_status,
                 "latest_execution": latest_exec,
             })
