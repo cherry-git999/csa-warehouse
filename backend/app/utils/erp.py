@@ -92,13 +92,10 @@ def pull_dataset(
                 return pd.DataFrame(dataset)
 
         except Exception as dataset_error:
-            if "404" in str(dataset_error) or "NOT FOUND" in str(dataset_error) or "Does not exist" in str(dataset_error):
-                logger.warning(
-                    f"Dataset '{source_name}' not found in ERP system ({dataset_error}). Returning empty DataFrame."
-                )
-                return pd.DataFrame()
-            else:
-                raise dataset_error
+            logger.error(
+                f"Failed to fetch dataset '{source_name}' from ERP system: {dataset_error}"
+            )
+            raise dataset_error
 
     except Exception as e:
         logger.exception(f"Error while pulling dataset for pipeline '{pipeline_id}': {e}")
