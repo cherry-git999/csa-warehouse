@@ -1,8 +1,9 @@
 """
 BASE Configuration.
 
-Defines connection, authentication, transport, timeouts, and endpoint templates
-for the BASE API without hardcoding unconfirmed endpoint assumptions.
+Defines connection, authentication, transport, and network timeout settings
+for the BASE API. Speculative hardcoded endpoint route templates have been
+removed in Phase 1 streamlining.
 """
 
 from functools import lru_cache
@@ -35,33 +36,6 @@ class BaseStorageConfig(BaseSettings):
     timeout_seconds: float = Field(default=15.0, env="BASE_TIMEOUT_SECONDS")
     connect_timeout_seconds: float = Field(default=5.0, env="BASE_CONNECT_TIMEOUT_SECONDS")
     max_retries: int = Field(default=1, env="BASE_MAX_RETRIES")
-
-    # Configurable Endpoint Templates (avoids hardcoding unconfirmed routes)
-    endpoint_save: str = Field(
-        default="/api/v1/datasets/save",
-        env="BASE_ENDPOINT_SAVE",
-        description="Path or URL template for saving dataset records"
-    )
-    endpoint_fetch: str = Field(
-        default="/api/v1/datasets/fetch",
-        env="BASE_ENDPOINT_FETCH",
-        description="Path or URL template for fetching dataset records"
-    )
-    endpoint_merge: str = Field(
-        default="/api/v1/datasets/merge",
-        env="BASE_ENDPOINT_MERGE",
-        description="Path or URL template for merging dataset records"
-    )
-    endpoint_checkpoint_get: str = Field(
-        default="/api/v1/checkpoints/{pipeline_id}",
-        env="BASE_ENDPOINT_CHECKPOINT_GET",
-        description="Path or URL template for retrieving checkpoint"
-    )
-    endpoint_checkpoint_update: str = Field(
-        default="/api/v1/checkpoints/{pipeline_id}",
-        env="BASE_ENDPOINT_CHECKPOINT_UPDATE",
-        description="Path or URL template for updating checkpoint"
-    )
 
     class Config:
         env_file = ".env"

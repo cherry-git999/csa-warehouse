@@ -1,14 +1,14 @@
 """
-Data Storage Factory.
+Data Storage Factory (Compatibility Shim).
+
+DEPRECATION NOTICE:
+This module is retained for backward compatibility. New code should use
+StorageRouter (app.services.storage.storage_router) for dataset/pipeline-aware
+storage backend resolution.
 
 Instantiates and returns the appropriate BaseDataStorage implementation
-based on environment configuration (DATA_STORAGE_BACKEND) or explicit selection.
-
-Default is 'mongodb' to preserve existing behavior and guarantee zero regression.
-When switching to 'base', BaseApiStorageService is used.
-
-DEFERRED IMPORTS: MongoDataStorage is imported lazily inside get_data_storage()
-so that importing data_storage_factory does not initialize MongoDB when BASE is used.
+based on environment configuration (DATA_STORAGE_BACKEND), explicit backend selection,
+or delegation to StorageRouter via pipeline_id.
 """
 
 from typing import Optional
@@ -17,22 +17,30 @@ from app.services.storage.base_data_storage import BaseDataStorage
 from app.services.storage.base_api_storage_service import BaseApiStorageService
 
 
-def get_data_storage(storage_backend: Optional[str] = None) -> BaseDataStorage:
+def get_data_storage(
+    storage_backend: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
+) -> BaseDataStorage:
     """
     Return the configured BaseDataStorage provider.
 
     Args:
         storage_backend: Optional override ("mongodb" or "base").
-                         If None, uses DATA_STORAGE_BACKEND from configuration.
+                         If None and pipeline_id is provided, delegates to StorageRouter.
+                         If None and pipeline_id is None, uses DATA_STORAGE_BACKEND from configuration.
+        pipeline_id: Optional canonical pipeline identifier to route via StorageRouter.
 
     Returns:
         Instance implementing BaseDataStorage.
     """
+    if pipeline_id is not None:
+        from app.services.storage.storage_router import get_storage_router
+        return get_storage_router().get_storage(pipeline_id)
+
     config = get_base_config()
     backend = (storage_backend or config.storage_backend).lower().strip()
 
     if backend == "mongodb":
-        # Lazy import preserves total isolation for BASE operations and prevents import-time side effects
         from app.services.storage.mongo_data_storage import MongoDataStorage
         return MongoDataStorage()
     elif backend == "base":

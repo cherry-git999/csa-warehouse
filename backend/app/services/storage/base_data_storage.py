@@ -2,27 +2,18 @@
 BaseDataStorage Contract.
 
 Application-facing abstract interface for dataset storage operations in CSA Warehouse.
-Establishes the contract for:
-- save_dataset
-- fetch_dataset
-- merge_dataset
-- get_checkpoint
-- update_checkpoint
+Establishes the minimal contract for:
+- save_dataset(pipeline_id, records, mode="upsert", identity_key=None) -> StorageResult
+- fetch_dataset(pipeline_id, filters=None, columns=None, limit=None, offset=None) -> List[Dict[str, Any]]
 
-All concrete implementations (BASE client service, MongoDB compatibility adapter)
-must implement this contract.
+All concrete implementations (MongoDB adapter, BASE API service) must implement this contract.
+Checkpoints, ETL joins, and data-frame conversions are intentionally excluded from this interface.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any, Union
-import pandas as pd
+from typing import Optional, List, Dict, Any
 
-from app.schemas.base_schema import (
-    SaveDatasetRequest,
-    FetchDatasetRequest,
-    MergeDatasetRequest,
-    StorageResponse,
-)
+from app.schemas.base_schema import StorageResult
 
 
 # ==============================================================================
@@ -49,136 +40,64 @@ class BaseAuthenticationError(BaseStorageError):
     pass
 
 
-class BaseDataValidationError(BaseStorageError):
-    """Raised when payload or schema validation fails."""
-    pass
-
-
 # ==============================================================================
-# BASE DATA STORAGE INTERFACE
+# BASE DATA STORAGE CONTRACT
 # ==============================================================================
 
 class BaseDataStorage(ABC):
     """
-    Abstract contract for dataset persistence, retrieval, merging,
-    and checkpoint management.
+    Minimal abstract contract for dataset persistence and retrieval.
+    Implementations must enforce strict failure visibility (never swallow errors).
     """
 
     @abstractmethod
     def save_dataset(
         self,
-        request: Union[SaveDatasetRequest, Dict[str, Any]],
-        **kwargs: Any
-    ) -> StorageResponse:
+        pipeline_id: str,
+        records: List[Dict[str, Any]],
+        mode: str = "upsert",
+        identity_key: Optional[str] = None,
+    ) -> StorageResult:
         """
         Persist a dataset's records into storage.
 
         Args:
-            request: SaveDatasetRequest model or equivalent dictionary containing:
-                     dataset_id, dataset_name, records, mode ("upsert" or "replace"),
-                     identity_key, pipeline_id, user_id, optional schema metadata.
+            pipeline_id: Canonical identifier of the pipeline / dataset.
+            records: List of dictionaries representing mapped records.
+            mode: Storage mode, either 'upsert' (incremental merge) or 'replace' (snapshot overwrite).
+            identity_key: Field used for record matching when mode='upsert'.
 
         Returns:
-            StorageResponse indicating success, record counts, and operation details.
+            StorageResult detailing operation outcome, record count, and mode.
 
         Raises:
-            BaseStorageError: On persistence failure (must never fail silently).
+            BaseStorageError (or subclass): On ANY persistence failure.
         """
         pass
 
     @abstractmethod
     def fetch_dataset(
         self,
-        request: Union[FetchDatasetRequest, Dict[str, Any], str],
-        **kwargs: Any
+        pipeline_id: str,
+        filters: Optional[Dict[str, Any]] = None,
+        columns: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch records for a dataset from storage.
 
         Args:
-            request: FetchDatasetRequest model, dictionary, or dataset_id / name string.
+            pipeline_id: Canonical identifier of the pipeline / dataset.
+            filters: Optional key-value equality filters.
+            columns: Optional list of column names to project.
+            limit: Maximum number of records to return.
+            offset: Record offset for pagination.
 
         Returns:
             List of dictionaries representing dataset records (empty list if not found).
 
         Raises:
-            BaseStorageError: On fetch failure.
+            BaseStorageError (or subclass): On ANY retrieval failure.
         """
         pass
-
-    @abstractmethod
-    def merge_dataset(
-        self,
-        request: Union[MergeDatasetRequest, Dict[str, Any]],
-        **kwargs: Any
-    ) -> StorageResponse:
-        """
-        Merge records or another dataset into a target dataset based on identity
-        or spatial/temporal resolution rules.
-
-        Args:
-            request: MergeDatasetRequest model or equivalent dictionary.
-
-        Returns:
-            StorageResponse indicating success, record counts, and operation details.
-
-        Raises:
-            BaseStorageError: On merge failure.
-        """
-        pass
-
-    @abstractmethod
-    def get_checkpoint(self, pipeline_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve the latest synchronization checkpoint for a pipeline.
-
-        Args:
-            pipeline_id: Identifier of the pipeline/dataset.
-
-        Returns:
-            Dictionary with checkpoint details (last_sync_timestamp, execution_id, etc.)
-            or None if no checkpoint exists.
-        """
-        pass
-
-    @abstractmethod
-    def update_checkpoint(
-        self,
-        pipeline_id: str,
-        last_sync_timestamp: Optional[str] = None,
-        execution_id: Optional[str] = None,
-        record_count: int = 0,
-        status: str = "success",
-        source_type: Optional[str] = None,
-        **kwargs: Any
-    ) -> Dict[str, Any]:
-        """
-        Update the synchronization checkpoint for a pipeline.
-        Must only be invoked after successful datastore persistence.
-
-        Args:
-            pipeline_id: Identifier of the pipeline/dataset.
-            last_sync_timestamp: Latest timestamp watermark from source records.
-            execution_id: UUID of the current execution.
-            record_count: Number of records processed.
-            status: Status of the sync operation ("success" or "error").
-            source_type: Source system identifier (e.g. "erpnext").
-
-        Returns:
-            Dictionary representing the updated checkpoint document.
-        """
-        pass
-
-    def fetch_dataset_df(
-        self,
-        request: Union[FetchDatasetRequest, Dict[str, Any], str],
-        **kwargs: Any
-    ) -> pd.DataFrame:
-        """
-        Convenience method to retrieve dataset records directly as a pandas DataFrame.
-        Useful for dashboards and analytic operations without coupling the interface.
-        """
-        records = self.fetch_dataset(request, **kwargs)
-        if not records:
-            return pd.DataFrame()
-        return pd.DataFrame(records)
