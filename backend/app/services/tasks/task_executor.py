@@ -11,6 +11,7 @@ from app.services.storage.mongodb_service import (
     get_sync_checkpoint,
     update_sync_checkpoint,
 )
+from app.services.storage.storage_router import get_storage_router
 from app.config.pipeline_mapping import get_pipeline_config
 from app.mappings import map_erp_data
 from app.config.logging import LoggerMixin
@@ -73,26 +74,20 @@ class TaskRunner(LoggerMixin):
             self.logger.info(
                 f"[{exec_id}] Prepared {len(dataset_json)} mapped records for storage.")
 
-            # Store/update dataset in MongoDB using upsert/merge or snapshot replacement
+            # Store dataset via StorageRouter
             storage_mode = "upsert" if sync_strategy == "timestamp" else "replace"
-            result = store_to_mongodb(
-                dataset_id=dataset_id,
-                dataset_name=dataset_name,
-                user_id=user_id,
-                username="",
-                user_email="",
-                dataset_records=dataset_json,
+            storage = get_storage_router().get_storage(target_pipeline_id)
+            storage_result = storage.save_dataset(
                 pipeline_id=target_pipeline_id,
-                identity_key=identity_key,
+                records=dataset_json,
                 mode=storage_mode,
+                identity_key=identity_key,
             )
 
-            if result.get("updated"):
-                self.logger.info(
-                    f"[{exec_id}] Updated dataset {dataset_id} (total records in DB: {result.get('record_count')}).")
-            elif result.get("inserted"):
-                self.logger.info(
-                    f"[{exec_id}] Created new dataset {dataset_id} (total records in DB: {result.get('record_count')}).")
+            self.logger.info(
+                f"[{exec_id}] Stored dataset '{target_pipeline_id}' via {storage.__class__.__name__} "
+                f"({storage_result.record_count} records in storage, mode='{storage_result.mode}')."
+            )
 
             # Determine latest watermark timestamp to save
             latest_watermark = datetime.now(timezone.utc).isoformat()
