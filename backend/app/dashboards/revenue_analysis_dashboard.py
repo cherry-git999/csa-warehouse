@@ -14,10 +14,17 @@ TODO – MongoDB migration:
 
   All downstream code remains unchanged.
 ─────────────────────────────────────────────────────────
+See docs/revenue_analysis_mapping.md for detailed ERP mapping specification.
 """
 
 import base64
-from utilities import initialize_page, load_dashboard_data_from_mongodb
+import logging
+from typing import Optional
+from pymongo.errors import PyMongoError
+try:
+    from utilities import initialize_page, _get_mongodb_db
+except ImportError:
+    from app.dashboards.utilities import initialize_page, _get_mongodb_db
 
 import pandas as pd
 import numpy as np
@@ -26,6 +33,9 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit_shadcn_ui as ui
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+PIPELINE_ID = "revenue_analysis"
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -49,14 +59,42 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
+# ── Data loading — Dashboard-owned MongoDB primary with CSV fallback ───────────
+def _query_mongodb_for_pipeline() -> Optional[pd.DataFrame]:
+    """
+    Directly query MongoDB for this dashboard's canonical dataset.
+    Resolves primarily via datasets_information -> datasets, with fallback to direct collection.
+    """
+    try:
+        db = _get_mongodb_db()
+
+        # Primary resolution: datasets_information -> datasets
+        info = db["datasets_information"].find_one({"pipeline_id": PIPELINE_ID})
+        if info and "dataset_id" in info:
+            ds_doc = db["datasets"].find_one({"_id": info["dataset_id"]})
+            if ds_doc and "data" in ds_doc:
+                return pd.DataFrame(ds_doc["data"])
+
+        # Secondary resolution: direct collection (backward compatibility)
+        if PIPELINE_ID in db.list_collection_names():
+            docs = list(db[PIPELINE_ID].find({}, {"_id": 0}))
+            if docs:
+                return pd.DataFrame(docs)
+
+        return None
+    except PyMongoError as db_err:
+        logger.warning(f"MongoDB connection error for pipeline '{PIPELINE_ID}': {db_err}")
+        st.sidebar.warning("⚠️ Live database unavailable. Showing reference data.")
+        return None
+
+
 def load_data() -> pd.DataFrame:
     """
-    Load revenue analysis data from MongoDB collection 'revenue_analysis'.
-    Always reads the fresh state from the MongoDB datastore without stale caching.
-    Falls back to local CSV reference data only if MongoDB collection is empty.
+    Load revenue analysis data for Dashboard 6.
+    Primary: MongoDB via canonical pipeline metadata lookup.
+    Fallback: Local reference CSV if MongoDB is empty or unreachable.
     """
-    df = load_dashboard_data_from_mongodb("revenue_analysis")
+    df = _query_mongodb_for_pipeline()
 
     if df is None or df.empty:
         if DATA_CSV.exists():
@@ -64,10 +102,15 @@ def load_data() -> pd.DataFrame:
         else:
             return pd.DataFrame(columns=["territory", "month", "purchase_amount", "sales_amount", "net_revenue"])
 
-    sales = df["sales_amount"].fillna(0) if "sales_amount" in df.columns else 0
-    purchases = df["purchase_amount"].fillna(0) if "purchase_amount" in df.columns else 0
-    df["net_revenue"] = sales - purchases
-    return df
+    try:
+        sales = df["sales_amount"].fillna(0) if "sales_amount" in df.columns else 0
+        purchases = df["purchase_amount"].fillna(0) if "purchase_amount" in df.columns else 0
+        df["net_revenue"] = sales - purchases
+        return df
+    except (KeyError, ValueError, AttributeError, TypeError) as prog_err:
+        logger.exception(f"Unexpected data transformation error in {PIPELINE_ID}: {prog_err}")
+        st.error(f"Error computing dashboard metrics: {prog_err}")
+        return df
 
 
 df = load_data()

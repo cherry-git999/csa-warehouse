@@ -15,10 +15,17 @@ TODO – MongoDB migration:
 
   All downstream code remains unchanged.
 ─────────────────────────────────────────────────────────
+See docs/nf_coordinator_mapping.md for detailed ERP mapping specification.
 """
 
 import base64
-from utilities import initialize_page, load_dashboard_data_from_mongodb
+import logging
+from typing import Optional
+from pymongo.errors import PyMongoError
+try:
+    from utilities import initialize_page, _get_mongodb_db
+except ImportError:
+    from app.dashboards.utilities import initialize_page, _get_mongodb_db
 
 import pandas as pd
 import plotly.express as px
@@ -26,6 +33,9 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit_shadcn_ui as ui
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+PIPELINE_ID = "nf_coordinator_activities"
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -41,14 +51,42 @@ LOGO_PATH = Path(__file__).parent / "assets" / "images" / "csalogo.png"
 initialize_page()
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
+# ── Data loading — Dashboard-owned MongoDB primary with CSV fallback ───────────
+def _query_mongodb_for_pipeline() -> Optional[pd.DataFrame]:
+    """
+    Directly query MongoDB for NF Coordinator dataset.
+    Resolves primarily via datasets_information -> datasets, with fallback to direct collection.
+    """
+    try:
+        db = _get_mongodb_db()
+
+        # Primary resolution: datasets_information -> datasets
+        info = db["datasets_information"].find_one({"pipeline_id": PIPELINE_ID})
+        if info and "dataset_id" in info:
+            ds_doc = db["datasets"].find_one({"_id": info["dataset_id"]})
+            if ds_doc and "data" in ds_doc:
+                return pd.DataFrame(ds_doc["data"])
+
+        # Secondary resolution: direct collection (backward compatibility)
+        if PIPELINE_ID in db.list_collection_names():
+            docs = list(db[PIPELINE_ID].find({}, {"_id": 0}))
+            if docs:
+                return pd.DataFrame(docs)
+
+        return None
+    except PyMongoError as db_err:
+        logger.warning(f"MongoDB connection error for pipeline '{PIPELINE_ID}': {db_err}")
+        st.sidebar.warning("⚠️ Live database unavailable. Showing reference data.")
+        return None
+
+
 def load_nf_data() -> pd.DataFrame:
     """
-    Load NF Coordinator activity data from MongoDB collection 'nf_coordinator_activities'.
-    Always reads the fresh state from the MongoDB datastore without stale caching.
-    Falls back to local CSV reference data only if MongoDB collection is empty.
+    Load NF Coordinator activity data for Dashboard 1.
+    Primary: MongoDB via canonical pipeline metadata lookup.
+    Fallback: Local reference CSV if MongoDB is empty or unreachable.
     """
-    df = load_dashboard_data_from_mongodb("nf_coordinator_activities")
+    df = _query_mongodb_for_pipeline()
 
     if df is None or df.empty:
         if NF_CSV.exists():
@@ -59,11 +97,16 @@ def load_nf_data() -> pd.DataFrame:
                 "planned_activities", "actual_activities", "total_score"
             ])
 
-    df["date"]        = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
-    df["month_label"] = df["date"].dt.strftime("%b %Y")
-    df["month_short"] = df["date"].dt.strftime("%B")
-    df["month_period"]= df["date"].dt.to_period("M")
-    return df
+    try:
+        df["date"]        = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
+        df["month_label"] = df["date"].dt.strftime("%b %Y")
+        df["month_short"] = df["date"].dt.strftime("%B")
+        df["month_period"]= df["date"].dt.to_period("M")
+        return df
+    except (KeyError, ValueError, AttributeError, TypeError) as prog_err:
+        logger.exception(f"Unexpected data transformation error in {PIPELINE_ID}: {prog_err}")
+        st.error(f"Error computing dashboard date metrics: {prog_err}")
+        return df
 
 
 df = load_nf_data()
@@ -109,7 +152,7 @@ st.markdown(
 st.sidebar.markdown("<hr>", unsafe_allow_html=True)
 
 # ── Filter widgets ─────────────────────────────────────────────────────────────
-all_coordinators = sorted(df["coordinator_name"].unique())
+all_coordinators = sorted([c for c in df["coordinator_name"].dropna().unique() if str(c).strip()])
 sel_coordinators = st.sidebar.multiselect(
     "NF Coordinator:",
     options=all_coordinators,
@@ -117,7 +160,7 @@ sel_coordinators = st.sidebar.multiselect(
     placeholder="All Coordinators",
 )
 
-all_districts = sorted(df["district"].unique())
+all_districts = sorted([d for d in df["district"].dropna().unique() if str(d).strip()])
 sel_districts = st.sidebar.multiselect(
     "District:",
     options=all_districts,
@@ -127,6 +170,7 @@ sel_districts = st.sidebar.multiselect(
 
 months_ordered = (
     df[["month_label", "month_period"]]
+    .dropna()
     .drop_duplicates()
     .sort_values("month_period")["month_label"]
     .tolist()
@@ -138,7 +182,7 @@ sel_months = st.sidebar.multiselect(
     placeholder="All Months",
 )
 
-all_activities = sorted(df["type_of_activity"].unique())
+all_activities = sorted([a for a in df["type_of_activity"].dropna().unique() if str(a).strip()])
 sel_activities = st.sidebar.multiselect(
     "Type of Activity:",
     options=all_activities,
@@ -165,16 +209,17 @@ if sel_activities:
 
 
 # ── Aggregates ─────────────────────────────────────────────────────────────────
-total_score    = int(df_f["total_score"].sum())
-total_planned  = int(df_f["planned_activities"].sum())
-total_actual   = int(df_f["actual_activities"].sum())
+total_score    = int(df_f["total_score"].fillna(0).sum()) if not df_f.empty and "total_score" in df_f.columns else 0
+total_planned  = int(df_f["planned_activities"].fillna(0).sum()) if not df_f.empty and "planned_activities" in df_f.columns else 0
+total_actual   = int(df_f["actual_activities"].fillna(0).sum()) if not df_f.empty and "actual_activities" in df_f.columns else 0
 total_variance = total_actual - total_planned
 overall_status = "Ahead" if total_variance >= 0 else "Behind"
 
 
 # ── Coordinator-level performance table ────────────────────────────────────────
 coord_perf = (
-    df_f.groupby("coordinator_name", as_index=False)
+    df_f.dropna(subset=["coordinator_name"])
+    .groupby("coordinator_name", as_index=False)
     .agg(
         Planned=("planned_activities", "sum"),
         Actual=("actual_activities", "sum"),
@@ -195,9 +240,9 @@ coord_perf.columns = [
 
 totals_row = pd.DataFrame([{
     "Name of NF Coordinator": "Total",
-    "Planned Activities":     coord_perf["Planned Activities"].sum(),
-    "Actual Activities":      coord_perf["Actual Activities"].sum(),
-    "Variance":               coord_perf["Variance"].sum(),
+    "Planned Activities":     coord_perf["Planned Activities"].sum() if not coord_perf.empty else 0,
+    "Actual Activities":      coord_perf["Actual Activities"].sum() if not coord_perf.empty else 0,
+    "Variance":               coord_perf["Variance"].sum() if not coord_perf.empty else 0,
     "Status":                 overall_status,
 }])
 table_data = pd.concat([coord_perf, totals_row], ignore_index=True)
@@ -205,7 +250,8 @@ table_data = pd.concat([coord_perf, totals_row], ignore_index=True)
 
 # ── Monthly score trend ────────────────────────────────────────────────────────
 monthly_scores = (
-    df_f.groupby(["month_period", "month_short"], as_index=False)["total_score"]
+    df_f.dropna(subset=["month_period", "month_short"])
+    .groupby(["month_period", "month_short"], as_index=False)["total_score"]
     .sum()
     .sort_values("month_period")
 )

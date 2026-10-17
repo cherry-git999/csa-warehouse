@@ -453,6 +453,9 @@ def trigger_warehouse_auto_sync(pipeline_id: str) -> bool:
 
 def load_dashboard_data_from_mongodb(collection_or_dataset_name: str, auto_sync: bool = False) -> pd.DataFrame:
     """
+    [DEPRECATED]: Dashboards now own their data loading logic directly.
+    Retained purely for backward compatibility with existing integration test suites.
+
     Generic utility to load dashboard data from MongoDB.
     Optionally triggers an automatic background/synchronous pipeline synchronization before query.
 

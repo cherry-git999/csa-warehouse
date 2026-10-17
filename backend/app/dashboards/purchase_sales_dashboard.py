@@ -15,10 +15,17 @@ TODO – MongoDB migration:
 
   All downstream code remains unchanged.
 ─────────────────────────────────────────────────────────
+See docs/purchase_sales_mapping.md for detailed ERP mapping specification.
 """
 
 import base64
-from utilities import initialize_page, load_dashboard_data_from_mongodb
+import logging
+from typing import Optional
+from pymongo.errors import PyMongoError
+try:
+    from utilities import initialize_page, _get_mongodb_db
+except ImportError:
+    from app.dashboards.utilities import initialize_page, _get_mongodb_db
 
 import pandas as pd
 import plotly.express as px
@@ -26,6 +33,9 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit_shadcn_ui as ui
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+PIPELINE_ID = "territory_transactions"
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -50,14 +60,42 @@ def fmt_amount(val: float) -> str:
     return f"{sign}{abs_val:.0f}"
 
 
-# ── Data loading — MongoDB primary with reference CSV fallback (Uncached) ──────
+# ── Data loading — Dashboard-owned MongoDB primary with CSV fallback ───────────
+def _query_mongodb_for_pipeline() -> Optional[pd.DataFrame]:
+    """
+    Directly query MongoDB for Territory Transactions dataset.
+    Resolves primarily via datasets_information -> datasets, with fallback to direct collection.
+    """
+    try:
+        db = _get_mongodb_db()
+
+        # Primary resolution: datasets_information -> datasets
+        info = db["datasets_information"].find_one({"pipeline_id": PIPELINE_ID})
+        if info and "dataset_id" in info:
+            ds_doc = db["datasets"].find_one({"_id": info["dataset_id"]})
+            if ds_doc and "data" in ds_doc:
+                return pd.DataFrame(ds_doc["data"])
+
+        # Secondary resolution: direct collection (backward compatibility)
+        if PIPELINE_ID in db.list_collection_names():
+            docs = list(db[PIPELINE_ID].find({}, {"_id": 0}))
+            if docs:
+                return pd.DataFrame(docs)
+
+        return None
+    except PyMongoError as db_err:
+        logger.warning(f"MongoDB connection error for pipeline '{PIPELINE_ID}': {db_err}")
+        st.sidebar.warning("⚠️ Live database unavailable. Showing reference data.")
+        return None
+
+
 def load_data() -> pd.DataFrame:
     """
-    Load territory purchase & sales data from MongoDB collection 'territory_transactions'.
-    Always reads the fresh state from the MongoDB datastore without stale caching.
-    Falls back to local CSV reference data only if MongoDB collection is empty.
+    Load territory purchase & sales data for Dashboard 2.
+    Primary: MongoDB via canonical pipeline metadata lookup.
+    Fallback: Local reference CSV if MongoDB is empty or unreachable.
     """
-    df = load_dashboard_data_from_mongodb("territory_transactions")
+    df = _query_mongodb_for_pipeline()
 
     if df is None or df.empty:
         if DATA_CSV.exists():
@@ -65,10 +103,15 @@ def load_data() -> pd.DataFrame:
         else:
             return pd.DataFrame(columns=["territory", "date", "purchase_amount", "sales_amount"])
 
-    df["date"]         = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
-    df["month_year"]   = df["date"].dt.strftime("%b %Y")      # "Sep 2024"
-    df["month_period"] = df["date"].dt.to_period("M")         # for sorting
-    return df
+    try:
+        df["date"]         = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
+        df["month_year"]   = df["date"].dt.strftime("%b %Y")      # "Sep 2024"
+        df["month_period"] = df["date"].dt.to_period("M")         # for sorting
+        return df
+    except (KeyError, ValueError, AttributeError, TypeError) as prog_err:
+        logger.exception(f"Unexpected data transformation error in {PIPELINE_ID}: {prog_err}")
+        st.error(f"Error computing dashboard date metrics: {prog_err}")
+        return df
 
 
 df = load_data()
