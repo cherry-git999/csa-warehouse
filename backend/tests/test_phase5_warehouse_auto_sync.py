@@ -25,6 +25,31 @@ print("=" * 80, flush=True)
 print("PHASE 5: WAREHOUSE REFRESH / REOPEN AUTO-SYNC TEST SUITE", flush=True)
 print("=" * 80, flush=True)
 
+# ── Deterministic Mock ERP Response (prevents live ERP dependencies & flakiness) ──
+MOCK_RAW_STOCK_DATA = []
+for i in range(35):
+    is_last = (i == 34)
+    MOCK_RAW_STOCK_DATA.append({
+        "company": "Nelathalli Farmer Producer Company Limited",
+        "warehouse": "Stores - NFPCL" if i % 2 == 0 else "Central Godown - NFPCL",
+        "item_code": f"ITEM-{i+1}",
+        "item_name": f"Item Name {i+1}",
+        "item_group": "Seeds",
+        "bal_qty": 158.0 if is_last else 30.0,
+        "bal_val": 154762.58 if is_last else 30000.0,
+        "in_qty": 37.0 if is_last else 8.0,
+        "out_qty": 17.0 if is_last else 0.0,
+        "to_date": "2026-08-20",
+    })
+
+def mock_pull_dataset(pipeline_id, since_timestamp=None):
+    if pipeline_id in ("stock_inventory", "stock_movement"):
+        return list(MOCK_RAW_STOCK_DATA)
+    return []
+
+pull_patcher = patch("app.services.tasks.task_executor.pull_dataset", side_effect=mock_pull_dataset)
+pull_patcher.start()
+
 test_errors = []
 
 # --------------------------------------------------------------------------
@@ -201,3 +226,5 @@ else:
     for err in test_errors:
         print(f"  - {err}", flush=True)
 print("=" * 80, flush=True)
+
+pull_patcher.stop()
